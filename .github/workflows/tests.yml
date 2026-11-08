@@ -1,0 +1,28 @@
+name: tests
+
+# Only the Hermes-independent suites run here: contract, service policy and the
+# tool schema / registration boundary. `tests/test_desktop.py` needs the Hermes
+# runtime (GoalManager, SessionDB) on PYTHONPATH and is intentionally excluded.
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  pure:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.9", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Contract
+        run: python -m unittest discover -s tests -p 'test_contract.py' -v
+      - name: Service policy
+        run: python -m unittest discover -s tests -p 'test_service.py' -v
+      - name: Schema and registration
+        run: python -m unittest discover -s tests -p 'test_plugin.py' -v

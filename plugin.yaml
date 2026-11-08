@@ -1,0 +1,10 @@
+name: hermes-todo-goal
+version: 0.1.0
+manifest_version: 2
+api_version: 1
+kind: standalone
+author: Ilya Somov
+description: "Goal lifecycle control for the current chat session: create, read, update, pause, resume and request verified completion, with an optional todo binding."
+license: MIT
+tags: [goals, autonomy, todo]
+provides_tools: [goal_control]
