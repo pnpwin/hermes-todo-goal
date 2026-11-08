@@ -6,10 +6,30 @@ The `goal_control` tool: an LLM manages the Goal of the **current chat** without
 manual `/goal` — create, read, update, pause, resume, and request verified
 completion. TODO is optional.
 
-**Status: implemented and verified locally. Not installed, not enabled.**
+**Status: installed in the default profile and exercised end to end through the CLI.
+Not yet exercised from the Desktop/TUI surface.**
+
+## What is verified
+
+- Live model run (CLI `chat --cli`, gpt-6.1-sol): the agent discovered the bundled
+  `goal-workflow` skill, called `goal_control` `status` → `create` → wrote the artifact →
+  `status` again, and reported the same revision the plugin computed; the goal landed
+  in `state_meta` under `goal:<session_key>`.
+- Judge path: `GoalManager.evaluate_after_turn()` on that reply (the exact call Desktop
+  makes at the turn boundary) returned `verdict: done` with a concrete reason and moved
+  the state `active → done`, `turns_used 1/30`.
+- `pause` → `resume` through the tool, revisions round-tripping, budget untouched.
+- Verified boundary: an identical `create` on an active goal is a no-op, not an error.
 
 Installing it, enabling it in a profile, restarting, and model-level E2E all need
 separate approval. This directory on its own activates nothing.
+
+### Surface note
+
+The goal-continuation hook (`_maybe_continue_goal_after_turn`) is wired only into the
+TUI runtime. A classic `hermes chat --cli` REPL or a `-z` one-shot therefore creates
+and reads the goal correctly but never judges or continues it by itself; that happens
+on the next TUI/Desktop turn.
 
 ## Why
 
@@ -38,7 +58,9 @@ Full semantics and error codes:
 
 ## Deliberate boundaries
 
-- `create` never replaces a live Goal: `active`/`paused` → `goal_exists`.
+- `create` never replaces a live Goal: a different contract while `active`/`paused` →
+  `goal_exists`. The identical contract while `active` is an idempotent no-op
+  (`changed: false`); a `done` goal may be replaced by a new one.
 - `resume` does not bypass `budget`/gate/auth stops and does not lift a wait barrier.
 - `complete` never writes `done`: the native judge decides at the turn boundary,
   after the gates pass. Evidence must be repeated in the reply — the judge reads the
@@ -145,10 +167,11 @@ actual registration is covered by `plugins doctor` and manifest shape by
 
 ## What is not verified
 
-- Model-level E2E: that the LLM itself calls the tool and that the native judge
-  closes the Goal.
-- Skill discovery and application by a new session.
-- Other surfaces (CLI, Telegram, ACP, Kanban workers) — only the Desktop session is claimed.
+- Desktop/TUI surface end to end: the toolset is enabled there and the judge call was
+  exercised directly, but no Desktop turn has created and closed a goal yet.
+- Continuation actually re-queueing a next turn in a live session (only the decision
+  path was run).
+- Other surfaces (Telegram, ACP, Kanban workers) — not exercised.
 - The race "user pauses exactly during an update" on a real UI: a unit test covers
   generation checking, not cross-process locking.
 
