@@ -1,161 +1,169 @@
 # hermes-todo-goal
 
-Инструмент `goal_control`: LLM управляет Goal **текущего чата** без ручного `/goal` —
-создание, чтение, изменение, пауза, продолжение и запрос проверенного завершения.
-TODO необязателен.
+**English** · [Русский](README.ru.md)
 
-**Статус: реализовано и проверено локально. Не установлено и не включено.**
+The `goal_control` tool: an LLM manages the Goal of the **current chat** without a
+manual `/goal` — create, read, update, pause, resume, and request verified
+completion. TODO is optional.
 
-Установка, включение в профиль, перезапуск и модельный E2E требуют отдельного
-разрешения. Этот каталог сам по себе ничего не активирует.
+**Status: implemented and verified locally. Not installed, not enabled.**
 
-## Зачем
+Installing it, enabling it in a profile, restarting, and model-level E2E all need
+separate approval. This directory on its own activates nothing.
 
-Goal в Hermes — это **контракт результата**: пять полей (`outcome`, `verification`,
-`constraints`, `boundaries`, `stop_when`), по которым штатный механизм продолжает
-работу между ходами и проверяет результат. TODO — изменяемый план действий;
-галочки не являются доказательством.
+## Why
 
-Раньше Goal задавался только слэш-командой, то есть человеком. Теперь это вызов
-инструмента, а продолжение, judge, quality gates и бюджет остаются штатными: плагин
-не запускает второй цикл и не пишет в SQLite напрямую.
+In Hermes a Goal is a **completion contract**: five fields (`outcome`,
+`verification`, `constraints`, `boundaries`, `stop_when`) that the native
+machinery uses to keep working between turns and to check the result. A TODO is a
+mutable action plan; ticking checkboxes is not evidence.
 
-## Действия
+A Goal used to be settable only through a slash command, i.e. by a human. Now it
+is a tool call, while continuation, the judge, quality gates and the turn budget
+stay native: the plugin starts no second loop and never writes to SQLite directly.
 
-| action | аргументы | что делает |
+## Actions
+
+| action | arguments | what it does |
 |---|---|---|
-| `status` | — | прочитать Goal, контракт и `revision`; ничего не пишет |
-| `create` | `contract`, `expected_todo_revision?` | создать Goal; независимо от TODO |
-| `update` | `contract`, `expected_revision` | заменить контракт на месте; бюджет, gates, subgoals, wait сохраняются |
-| `pause` | `expected_revision`, `reason` | остановить автопродолжение (не прерывает текущий вызов) |
-| `resume` | `expected_revision`, `reason` | продолжить с остатком бюджета, без сброса `turns_used` |
-| `complete` | `expected_revision`, `evidence` | запросить проверку; возвращает `verification_status: pending` |
+| `status` | — | read the Goal, its contract and `revision`; writes nothing |
+| `create` | `contract`, `expected_todo_revision?` | create a Goal, independent of any TODO |
+| `update` | `contract`, `expected_revision` | replace the contract in place; budget, gates, subgoals and wait survive |
+| `pause` | `expected_revision`, `reason` | stop auto-continuation (does not interrupt the current call) |
+| `resume` | `expected_revision`, `reason` | continue with the remaining budget, without resetting `turns_used` |
+| `complete` | `expected_revision`, `evidence` | request verification; returns `verification_status: pending` |
 
-Полная семантика и коды ошибок: [skills/goal-workflow/references/tool-contract.md](skills/goal-workflow/references/tool-contract.md).
+Full semantics and error codes:
+[skills/goal-workflow/references/tool-contract.md](skills/goal-workflow/references/tool-contract.md).
 
-## Границы (сознательные)
+## Deliberate boundaries
 
-- `create` не заменяет живой Goal: `active`/`paused` → отказ `goal_exists`.
-- `resume` не обходит `budget`/gate/auth-остановки и не снимает wait barrier.
-- `complete` не ставит `done`: вердикт даёт штатный judge на границе хода, после
-  прохождения gates. Доказательства нужно повторить в ответе — judge читает ответ,
-  а не результат инструмента.
-- Сессия берётся из контекста хода (`bound_session_key()`), а не из аргументов
-  модели: дочерний агент с `conversation_id` родителя не достанет чужой Goal.
-- Каждая мутация перечитывается у хоста и сверяется по полям; потерянная запись
-  даёт `persistence_unverified`, а не «успех».
-- Модель не может передать `session_id`, `profile`, `home`, `db_path`, `approved`,
-  `reset_budget`, команды gates — такие аргументы отвергаются до побочных эффектов.
+- `create` never replaces a live Goal: `active`/`paused` → `goal_exists`.
+- `resume` does not bypass `budget`/gate/auth stops and does not lift a wait barrier.
+- `complete` never writes `done`: the native judge decides at the turn boundary,
+  after the gates pass. Evidence must be repeated in the reply — the judge reads the
+  reply, not the tool result.
+- The session comes from the turn context (`bound_session_key()`), never from model
+  arguments: a child agent carrying its parent's `conversation_id` cannot reach
+  another session's Goal.
+- Every mutation is re-read from the host and compared field by field; a lost write
+  yields `persistence_unverified`, not "success".
+- The model cannot pass `session_id`, `profile`, `home`, `db_path`, `approved`,
+  `reset_budget` or gate commands — such arguments are rejected before any side effect.
 
-### Известное ограничение: подтверждение `update`
+### Known limitation: confirming `update`
 
-В этом билде Hermes у инструмента нет доверенного канала подтверждения
-(`PluginContext.ask_choice` работает только из слэш-команды, а `clarify` требует
-agent-callback, которого registry-инструмент не получает). Поэтому `update`
-не спрашивает диалог, а:
+In this Hermes build the tool has no trusted confirmation channel
+(`PluginContext.ask_choice` works only from a slash command, and `clarify` needs an
+agent callback that a registry tool does not receive). So `update` does not prompt;
+instead it:
 
-1. сохраняет before/after в аудит `plugin-data/hermes-todo-goal/goals/<sha256>.json`
-   (ключ сессии хэшируется, последние 50 событий);
-2. возвращает `notice`, который скилл обязывает показать пользователю;
-3. никогда не трогает бюджет, gates, subgoals и wait.
+1. records before/after in the audit trail at
+   `plugin-data/hermes-todo-goal/goals/<sha256>.json` (session key is hashed, last
+   50 events kept);
+2. returns a `notice` the skill is required to show the user;
+3. never touches budget, gates, subgoals or wait state.
 
-Ограничением это является потому, что ослабление контракта не блокируется
-технически. Если нужен жёсткий гейт — требуется host-API для подтверждения из
-инструмента; это отдельная задача, а не работа обходным путём.
+This is a limitation precisely because weakening the contract is not technically
+blocked. A hard gate needs a host API for in-tool confirmation — a separate task,
+not something to work around.
 
-## Установка (не выполнена)
+## Installation (not performed)
 
-Опубликовано: https://github.com/pnpwin/hermes-todo-goal (MIT, CI на 3.11/3.12
-зелёный, 62 Hermes-независимых теста в чистом клоне).
+Published at https://github.com/pnpwin/hermes-todo-goal (MIT; CI green on
+3.11/3.12; 62 Hermes-independent tests pass in a clean clone).
 
-Голый путь в `hermes plugins install` не принимается: он разбирается как GitHub
-`owner/repo` (`_resolve_git_url` даёт `https://github.com/Users/somovis.git` + subdir).
-Два рабочих варианта:
+A bare path is not accepted by `hermes plugins install`: it is parsed as a GitHub
+`owner/repo` (`_resolve_git_url` yields `https://github.com/Users/somovis.git` plus
+a subdirectory). Three working routes:
 
-**A. Управляемая установка из git** (запись в `plugins/.install-metadata.json`,
-работают `plugins update`):
+**A. Managed install from the hosted repo** (records provenance in
+`plugins/.install-metadata.json`, so `plugins update` works):
 
 ```sh
-cd /Users/somovis/projects/hermes_agent/hermes-todo-goal
-git init && git add -A && git commit -m "hermes-todo-goal 0.1.0"
-hermes plugins install "file://$PWD" --enable
-# либо после push: hermes plugins install pnpwin/hermes-todo-goal --enable
+hermes plugins install pnpwin/hermes-todo-goal --enable
 ```
 
-**B. Ручная директория** (так на этой машине живут `hermes-skillcraft`, `ast-index`):
-без provenance и без авто-обновлений.
+**B. Managed install from a local checkout** — same provenance, via a `file://`
+URL:
 
 ```sh
-cp -R /Users/somovis/projects/hermes_agent/hermes-todo-goal ~/.hermes/plugins/
+cd /path/to/hermes-todo-goal
+hermes plugins install "file://$PWD" --enable
+```
+
+**C. Manual directory** (no provenance, no updates — how `hermes-skillcraft` and
+`ast-index` live on this machine):
+
+```sh
+cp -R /path/to/hermes-todo-goal ~/.hermes/plugins/
 hermes plugins enable hermes-todo-goal
 ```
 
-Не запускалось. После загрузки инструмент появляется как `goal_control` в toolset
-`goals` (плагинные toolsets включаются автоматически, тикать `hermes tools` не нужно),
-скилл — как `goal-workflow`.
+Not run yet. Once loaded, the tool appears as `goal_control` in the `goals`
+toolset (plugin toolsets are enabled automatically; nothing to tick in
+`hermes tools`) and the skill as `goal-workflow`.
 
-### Нужен ли рестарт
+### Is a restart needed
 
-- Новый процесс CLI/TUI — нет: каждый процесс обнаруживает плагины на старте.
-- Уже запущенные Desktop/gateway: `install --enable` / `enable` шлёт по control
-  socket `reload-plugins` (и будит backend Desktop). Если ответ пришёл, плагин
-  загружается в процессе сразу, но **Python-инструменты остаются отложенными до
-  следующей сессии** (`plugins_activation.py`: «Python tools and system-prompt
-  sections stay deferred to the next session»). Значит: открыть новый чат.
-- Если gateway не ответил (`restart_required`) — перезапуск: закрыть и открыть
-  Hermes Desktop либо `hermes gateway restart`.
+- A new CLI/TUI process — no: every process discovers plugins at startup.
+- An already running Desktop/gateway: `install --enable` / `enable` sends
+  `reload-plugins` over the control socket (and wakes the Desktop backend). If it
+  answers, the plugin loads in-process, but **Python tools stay deferred to the next
+  session** (`plugins_activation.py`: "Python tools and system-prompt sections stay
+  deferred to the next session"). Open a new chat.
+- If the gateway did not answer (`restart_required`): quit and reopen Hermes
+  Desktop, or run `hermes gateway restart`.
 
-## Проверка
+## Verification
 
-Из корня каталога:
+From the repository root:
 
 ```sh
-# 1. Чистое ядро: контракт, политика, схема, регистрация (stdlib, Python 3.15t)
-/Users/somovis/.pyenv/versions/3.15.2t/bin/python3.15t -B -m unittest discover -s tests \
-  -p 'test_contract.py' -v
-/Users/somovis/.pyenv/versions/3.15.2t/bin/python3.15t -B -m unittest discover -s tests \
-  -p 'test_service.py' -v
-/Users/somovis/.pyenv/versions/3.15.2t/bin/python3.15t -B -m unittest discover -s tests \
-  -p 'test_plugin.py' -v
+# 1. Hermes-independent core: contract, policy, schema, registration (stdlib only)
+python3 -B -m unittest discover -s tests -p 'test_contract.py' -v
+python3 -B -m unittest discover -s tests -p 'test_service.py' -v
+python3 -B -m unittest discover -s tests -p 'test_plugin.py' -v
 
-# 2. Нативная интеграция: настоящие GoalManager и SessionDB, временный HERMES_HOME
-#    HERMES_DISABLE_LAZY_INSTALLS=1 обязателен: без него чужой HERMES_HOME
-#    запускает bootstrap зависимостей и перезапускает интерпретатор.
+# 2. Native integration: real GoalManager and SessionDB against a throwaway HERMES_HOME.
+#    HERMES_DISABLE_LAZY_INSTALLS=1 is required: without it a foreign HERMES_HOME
+#    triggers the dependency bootstrap and re-executes the interpreter.
 HERMES_DISABLE_LAZY_INSTALLS=1 HERMES_HOME=$(mktemp -d) \
-  PYTHONPATH=/Users/somovis/.hermes/hermes-agent \
-  /Users/somovis/.hermes/hermes-agent/venv/bin/python -B -m unittest discover -s tests \
+  PYTHONPATH="$HERMES_AGENT_DIR" \
+  "$HERMES_AGENT_DIR/venv/bin/python" -B -m unittest discover -s tests \
   -p 'test_desktop.py' -v
 
-# 3. Пакетные проверки (без установки)
+# 3. Packaging checks (without installing)
 hermes plugins validate . --json
 hermes plugins doctor --ci .
 hermes skillcraft check skills/goal-workflow
 ```
 
-`test_plugin.py` использует записывающий fake-context, а не настоящий
-PluginManager; реальную регистрацию проверяет `plugins doctor`, а форму манифеста —
+`test_plugin.py` uses a recording fake context rather than a real `PluginManager`;
+actual registration is covered by `plugins doctor` and manifest shape by
 `plugins validate`.
 
-## Что НЕ проверено
+## What is not verified
 
-- Модельный E2E: что LLM сама вызывает инструмент и что штатный judge закрывает Goal.
-- Discovery/применение скилла новой сессией.
-- Другие поверхности (CLI, Telegram, ACP, Kanban-воркеры) — заявлена Desktop-сессия.
-- Гонка «пользовательская пауза ровно в момент update» на настоящем UI: юнит-тест
-  проверяет сверку поколения, но не межпроцессную блокировку.
+- Model-level E2E: that the LLM itself calls the tool and that the native judge
+  closes the Goal.
+- Skill discovery and application by a new session.
+- Other surfaces (CLI, Telegram, ACP, Kanban workers) — only the Desktop session is claimed.
+- The race "user pauses exactly during an update" on a real UI: a unit test covers
+  generation checking, not cross-process locking.
 
-## Структура
+## Layout
 
 ```text
-plugin.yaml                     манифест (provides_tools: [goal_control])
+plugin.yaml                     manifest (provides_tools: [goal_control])
 __init__.py                     from .src.plugin import register
-src/contract.py                 валидация контракта и TODO-привязки (без Hermes)
-src/service.py                  политика действий, сверка readback (без Hermes)
-src/schema.py                   схема инструмента
-src/desktop.py                  host-адаптер: session context, GoalManager, транскрипт TODO
+src/contract.py                 contract and TODO-binding validation (no Hermes)
+src/service.py                  action policy, readback checking (no Hermes)
+src/schema.py                   tool schema
+src/desktop.py                  host adapter: session context, GoalManager, TODO transcript
 src/plugin.py                   register(): 1 tool + 1 bundled skill
-skills/goal-workflow/SKILL.md   поведение агента
+skills/goal-workflow/SKILL.md   agent behaviour
 tests/                          contract, service, plugin, desktop (native)
 ```
 
-Лицензия: MIT ([LICENSE](LICENSE)).
+License: MIT ([LICENSE](LICENSE)).
