@@ -65,6 +65,9 @@ agent-callback, которого registry-инструмент не получа
 
 ## Установка (не выполнена)
 
+Опубликовано: https://github.com/pnpwin/hermes-todo-goal (MIT, CI на 3.11/3.12
+зелёный, 62 Hermes-независимых теста в чистом клоне).
+
 Голый путь в `hermes plugins install` не принимается: он разбирается как GitHub
 `owner/repo` (`_resolve_git_url` даёт `https://github.com/Users/somovis.git` + subdir).
 Два рабочих варианта:
