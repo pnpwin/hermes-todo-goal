@@ -185,4 +185,4 @@ skills/goal-workflow/SKILL.md   поведение агента
 tests/                          contract, service, plugin, desktop (native)
 ```
 
-Лицензия: MIT ([LICENSE](LICENSE)).
+Лицензия: MIT ([LICENSE](LICENSE)). Изменения: [CHANGELOG.md](CHANGELOG.md).
