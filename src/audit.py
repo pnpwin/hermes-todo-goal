@@ -11,6 +11,10 @@ class AuditError(Exception):
     pass
 
 
+class BindingUnavailable(AuditError):
+    """No retained originating event proves presence or absence of a binding."""
+
+
 def append_event(path, event, *, keep=50):
     path = Path(path)
     after = event.get("after")
@@ -34,6 +38,8 @@ def append_event(path, event, *, keep=50):
 
 def _append_locked(path, event, generation, keep):
     old = read_payload(path)
+    if old is None and event.get("event") != "create":
+        raise BindingUnavailable("audit_origin_missing")
     if event.get("event") != "create" and old and old.get("generation") != generation:
         raise AuditError("audit_generation_mismatch")
     if event.get("event") == "create":
@@ -79,6 +85,11 @@ def read_payload(path):
     version = data.get("schema_version", 0)
     if type(version) is not int or version not in (0, 1):
         raise AuditError("audit_version_unsupported")
+    if version == 1:
+        if "binding" not in data:
+            raise AuditError("audit_binding_invalid")
+        if data["binding"] is not None and not valid_binding(data["binding"]):
+            raise AuditError("audit_binding_invalid")
     return data
 
 
@@ -109,4 +120,4 @@ def binding_for(data, generation):
             if not valid_binding(value):
                 raise AuditError("audit_binding_invalid")
             return copy.deepcopy(value)
-    return None
+    raise BindingUnavailable("audit_origin_missing")

@@ -132,6 +132,35 @@ class HandlerTest(unittest.TestCase):
         self.assertEqual(adapter.writes, 1)
         self.assertEqual(adapter.audits, [])
 
+    def test_mutation_exception_preserves_unknown_effect(self):
+        from test_service import FakeAdapter, contract, new_state
+        from src.service import state_revision
+        class WriteThenRaise(FakeAdapter):
+            def _store(self, state):
+                super()._store(state)
+                raise OSError("private-write-error")
+        for action in ("create", "pause", "resume"):
+            with self.subTest(action=action):
+                state = None if action == "create" else new_state()
+                if action == "resume":
+                    state = new_state(status="paused", paused_reason="agent:wait")
+                adapter = WriteThenRaise(state=state)
+                args = {"action": action}
+                if action == "create":
+                    args["contract"] = contract()
+                else:
+                    args.update(expected_revision=state_revision(state), reason="continue")
+                raw = plugin.build_handler(lambda: adapter)(args)
+                result = json.loads(raw)
+                self.assertEqual(result.get("outcome"), "unknown")
+                self.assertIsNone(result["changed"])
+                self.assertEqual(result["revision"], state_revision(adapter.state))
+                self.assertEqual(result["state"]["status"], adapter.state["status"])
+                self.assertEqual(result["audit_status"], "not_attempted")
+                self.assertIn("do not retry", result["error"]["message"])
+                self.assertNotIn("private-write-error", raw)
+                self.assertEqual(adapter.writes, 1)
+
     def test_status_result_is_json_serialisable(self):
         handler = plugin.build_handler(lambda: StubAdapter(state=None))
         result = json.loads(handler({"action": "status"}))

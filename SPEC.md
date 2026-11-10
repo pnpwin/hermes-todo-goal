@@ -56,6 +56,8 @@ Host helper создаёт каталог; read path вычисляет тот �
 
 Schema v1: native created_at generation, binding отдельно от последних 50 events.
 Legacy binding читается только из matching create; чтение не мигрирует файл.
+Если originating create отсутствует, binding unknown/missing; non-create audit
+отказывает, сохраняя старые bytes, вместо подтверждения отсутствующей привязки.
 Новое поколение сбрасывает binding. Повреждённый/неподдерживаемый файл сохраняется
 и даёт failed. Evidence — task data без автоматического удаления секретов.
 

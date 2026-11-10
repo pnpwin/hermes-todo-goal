@@ -64,7 +64,8 @@ class AuditTest(unittest.TestCase):
         data = {"generation": 1.0, "events": [event(todo_revision=7, todo_ids=["a"])]}
         self.assertEqual(binding_for(data, 1.0), {"revision": 7, "ids": ["a"]})
         self.assertIsNone(binding_for(data, 2.0))
-        self.assertIsNone(binding_for({"generation": 1.0, "events": []}, 1.0))
+        with self.assertRaises(AuditError):
+            binding_for({"generation": 1.0, "events": []}, 1.0)
 
     def test_new_generation_clears_binding(self):
         with tempfile.TemporaryDirectory() as root:
@@ -112,6 +113,23 @@ class AuditTest(unittest.TestCase):
                 path.write_text(json.dumps({"generation": generation, "events": []}))
                 with self.assertRaises(AuditError):
                     read_payload(path)
+
+    def test_new_create_does_not_replace_structurally_corrupt_binding(self):
+        with tempfile.TemporaryDirectory() as root:
+            path = Path(root) / "session.json"
+            path.write_text(json.dumps({"schema_version": 1, "generation": 1.0,
+                "events": [], "binding": {"revision": True, "ids": ["a"]}}))
+            before = path.read_bytes()
+            with self.assertRaises(AuditError):
+                append_event(path, event(generation=2.0))
+            self.assertEqual(path.read_bytes(), before)
+
+    def test_non_create_does_not_invent_absent_binding_without_audit(self):
+        with tempfile.TemporaryDirectory() as root:
+            path = Path(root) / "session.json"
+            with self.assertRaises(AuditError):
+                append_event(path, event("pause"))
+            self.assertFalse(path.exists())
 
     def test_binding_result_is_independent(self):
         value = {"schema_version": 1, "generation": 1.0, "events": [],

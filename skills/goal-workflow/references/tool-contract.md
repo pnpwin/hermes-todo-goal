@@ -59,6 +59,8 @@ register a Hermes quality gate. Gates stay a user action (`/goal gate add`).
   native created_at generation, separate binding and last 50 events. Unique temp
   and exclusive directory lock serialize audit writers, not native Goal writers.
   Lock conflict fails explicitly; stale lock recovery belongs to the operator.
+  An absent legacy create means unknown/missing binding, not confirmed null;
+  non-create audit then refuses without migrating or overwriting the old file.
 - Status never creates audit directories or repairs corrupt files. It may return
   native `ok:true` with `audit_status:failed`, a warning and null binding.
 - Mutation audit failure returns `ok:false`, `outcome:partial` with actual state and

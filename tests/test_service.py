@@ -311,6 +311,17 @@ class ServiceTest(unittest.TestCase):
             })
         self.assertEqual(ctx.exception.code, "persistence_unverified")
 
+    def test_pause_readback_rejects_lost_budget_or_contract_identity(self):
+        for field in ("max_turns", "goal", "contract", "created_at"):
+            with self.subTest(field=field):
+                state = new_state()
+                adapter = FakeAdapter(state=state, drop_on_write={field})
+                with self.assertRaises(GoalError) as caught:
+                    GoalService(adapter).handle({"action": "pause",
+                        "expected_revision": state_revision(state), "reason": "wait"})
+                self.assertEqual(caught.exception.code, "persistence_unverified")
+                self.assertEqual(adapter.audits, [])
+
     def test_pause_marks_agent_reason_and_keeps_budget(self):
         state = new_state()
         adapter = FakeAdapter(state=state)
@@ -384,6 +395,17 @@ class ServiceTest(unittest.TestCase):
         self.assertEqual(caught.exception.code, "pause_not_resumable")
         self.assertEqual(adapter.state, state)
         self.assertEqual(adapter.writes, 0)
+
+    def test_resume_readback_rejects_lost_contract_identity(self):
+        for field in ("goal", "contract", "created_at"):
+            with self.subTest(field=field):
+                state = new_state(status="paused", paused_reason="agent:wait")
+                adapter = FakeAdapter(state=state, drop_on_write={field})
+                with self.assertRaises(GoalError) as caught:
+                    GoalService(adapter).handle({"action": "resume",
+                        "expected_revision": state_revision(state), "reason": "go"})
+                self.assertEqual(caught.exception.code, "persistence_unverified")
+                self.assertEqual(adapter.audits, [])
 
     def test_resume_preserves_turns_used(self):
         state = new_state(status="paused", paused_reason="agent:waiting")

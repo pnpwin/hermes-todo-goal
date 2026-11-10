@@ -261,7 +261,7 @@ class HermesGoalAdapter:
         return root / f"{digest}.json"
 
     def audit_binding(self, generation):
-        from .audit import AuditError, binding_for, read_payload
+        from .audit import AuditError, BindingUnavailable, binding_for, read_payload
         try:
             data = read_payload(self._audit_path())
             if data is None:
@@ -269,6 +269,8 @@ class HermesGoalAdapter:
             if data.get("generation") != generation:
                 return None, "generation_mismatch"
             return binding_for(data, generation), "confirmed"
+        except BindingUnavailable:
+            return None, "missing"
         except (AuditError, OSError, ValueError, TypeError):
             return None, "failed"
 

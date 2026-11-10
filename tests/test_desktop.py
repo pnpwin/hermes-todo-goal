@@ -398,6 +398,21 @@ goals.clear_goal("same-route")
             self.assertEqual(json.loads(Path(receipt["audit"]).read_text())["generation"],
                              receipt["generation"])
 
+    def test_legacy_without_create_keeps_binding_unknown(self):
+        self.service.handle({"action": "create", "contract": dict(CONTRACT)})
+        state = self.adapter.load()
+        path = self.adapter._audit_path()
+        path.write_text(json.dumps({"generation": state["created_at"], "events": [
+            {"event": "complete_requested", "after": {"created_at": state["created_at"]}}]}))
+        before = path.read_bytes()
+        status = self.service.handle({"action": "status"})
+        self.assertEqual(status["audit_status"], "missing")
+        self.assertIsNone(status["todo_binding"])
+        result = self.service.handle({"action": "pause", "expected_revision": status["revision"],
+                                      "reason": "waiting"})
+        self.assertEqual(result["outcome"], "partial")
+        self.assertEqual(path.read_bytes(), before)
+
     # ---- helpers ------------------------------------------------------
     def _append_todo_turn(self, payload_json: str, session_id=None) -> None:
         db = self.adapter._store()

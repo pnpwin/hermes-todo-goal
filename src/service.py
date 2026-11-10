@@ -178,6 +178,25 @@ class GoalService:
                 "the goal changed since it was read; call action=status again and re-apply",
             )
 
+    def _mutate(self, operation):
+        try:
+            return operation()
+        except GoalError:
+            raise  # explicit adapter refusals precede its native write
+        except Exception:
+            try:
+                actual = self._state()
+            except Exception:
+                actual = None
+            raise GoalError(
+                "persistence_unverified",
+                "Native mutation raised after a possible effect; do not retry automatically.",
+                details={"outcome": "unknown", "changed": None, "native_status": "unknown",
+                         "audit_status": "not_attempted", "state": _project(actual),
+                         "revision": state_revision(actual) if actual is not None else None,
+                         "todo_binding": None},
+            ) from None
+
     def _readback(self, expected: dict[str, Any], fields: tuple[str, ...]) -> dict[str, Any]:
         try:
             confirmed = self._state()
@@ -288,7 +307,7 @@ class GoalService:
                 "update it, resume it, or ask the user to clear it before creating another",
             )
 
-        self._adapter.create(outcome, prepared["contract"])
+        self._mutate(lambda: self._adapter.create(outcome, prepared["contract"]))
         confirmed = self._readback(
             {"goal": outcome, "contract": prepared["contract"], "status": "active"},
             ("goal", "contract", "status"),
@@ -334,12 +353,14 @@ class GoalService:
         if state.get("status") != "active":
             raise GoalError("goal_not_active",
                             f"only an active goal can be paused, not a {state.get('status')} one")
-        self._adapter.pause(f"{AGENT_PAUSE_PREFIX}{reason}")
+        self._mutate(lambda: self._adapter.pause(f"{AGENT_PAUSE_PREFIX}{reason}"))
         confirmed = self._readback(
             {"status": "paused", "paused_reason": f"{AGENT_PAUSE_PREFIX}{reason}",
              "turns_used": state.get("turns_used"), "subgoals": state.get("subgoals"),
-             "gates": state.get("gates")},
-            ("status", "paused_reason", "turns_used", "subgoals", "gates"),
+             "gates": state.get("gates"),
+             **{key: state.get(key) for key in ("max_turns", "goal", "contract", "created_at")}},
+            ("status", "paused_reason", "turns_used", "subgoals", "gates",
+             "max_turns", "goal", "contract", "created_at"),
         )
         audit_ok = self._audit("pause", before=state, after=confirmed, reason=reason)
         return self._finish(
@@ -372,12 +393,14 @@ class GoalService:
             )
         if state.get("turns_used", 0) >= state.get("max_turns", 0):
             raise GoalError("pause_not_resumable", "The remaining goal budget is exhausted.")
-        self._adapter.resume()
+        self._mutate(self._adapter.resume)
         confirmed = self._readback(
             {"status": "active", "paused_reason": None,
              "turns_used": state.get("turns_used"), "max_turns": state.get("max_turns"),
-             "subgoals": state.get("subgoals"), "gates": state.get("gates")},
-            ("status", "paused_reason", "turns_used", "max_turns", "subgoals", "gates"),
+             "subgoals": state.get("subgoals"), "gates": state.get("gates"),
+             **{key: state.get(key) for key in ("goal", "contract", "created_at")}},
+            ("status", "paused_reason", "turns_used", "max_turns", "subgoals", "gates",
+             "goal", "contract", "created_at"),
         )
         audit_ok = self._audit("resume", before=state, after=confirmed, reason=reason)
         return self._finish(

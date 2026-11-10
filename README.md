@@ -89,7 +89,10 @@ Full semantics and error codes:
   transcript ID. It is **not** the live TodoStore; Goal route and transcript IDs differ.
 - Audit format v1 lives at `plugin-data/hermes-todo-goal/goals/<sha256[:32]>.json`.
   Binding belongs to native `created_at` and survives 50-event retention. Legacy
-  matching create events are read without migration-on-read. Corrupt journals are
+  matching create events are read without migration-on-read. If the originating
+  legacy create is no longer retained, binding stays unknown/missing; a non-create
+  write refuses rather than converting that uncertainty into confirmed null.
+  Corrupt journals are
   preserved, not silently replaced. Completion evidence (up to 4000 characters)
   is retained as task data, without automatic secret redaction; do not submit secrets.
 - Audit writes use a unique temporary file and an exclusive directory lock. Lock
