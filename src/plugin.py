@@ -64,7 +64,7 @@ def build_handler(adapter_factory: Callable[..., Any], *, dispatch_session: bool
         except GoalError as exc:
             action = params.get("action") if isinstance(params, dict) else None
             return json.dumps({"ok": False, "action": action,
-                               "error": exc.to_dict()}, ensure_ascii=False)
+                               "error": exc.to_dict(), **exc.details}, ensure_ascii=False)
         except Exception as exc:  # never leak a traceback into the model's context
             return _refuse("internal_error", type(exc).__name__)
         return json.dumps(result, ensure_ascii=False)

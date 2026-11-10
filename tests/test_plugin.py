@@ -114,6 +114,24 @@ class HandlerTest(unittest.TestCase):
         self.assertNotIn("private-canary", raw)
         self.assertEqual(json.loads(raw)["error"]["code"], "internal_error")
 
+    def test_failed_readback_reports_unknown_effect(self):
+        from test_service import FakeAdapter, contract
+        class BrokenReadback(FakeAdapter):
+            def load(self):
+                if self.writes:
+                    raise OSError("private store failure")
+                return super().load()
+        adapter = BrokenReadback()
+        result = json.loads(plugin.build_handler(lambda: adapter)(
+            {"action": "create", "contract": contract()}))
+        self.assertEqual(result.get("outcome"), "unknown")
+        self.assertIsNone(result["changed"])
+        self.assertIsNone(result["revision"])
+        self.assertIsNone(result["state"])
+        self.assertEqual(result["error"]["code"], "persistence_unverified")
+        self.assertEqual(adapter.writes, 1)
+        self.assertEqual(adapter.audits, [])
+
     def test_status_result_is_json_serialisable(self):
         handler = plugin.build_handler(lambda: StubAdapter(state=None))
         result = json.loads(handler({"action": "status"}))

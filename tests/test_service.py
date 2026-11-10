@@ -110,6 +110,55 @@ class ServiceTest(unittest.TestCase):
     def service(self, **kwargs):
         return GoalService(FakeAdapter(**kwargs))
 
+    def test_audit_failure_reports_confirmed_native_effect(self):
+        adapter = FakeAdapter()
+        adapter.audit = lambda event: False
+        result = GoalService(adapter).handle({"action": "create", "contract": contract()})
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["outcome"], "partial")
+        self.assertTrue(result["changed"])
+        self.assertEqual(result["native_status"], "confirmed")
+        self.assertEqual(result["audit_status"], "failed")
+        self.assertEqual(result["state"]["status"], "active")
+        self.assertEqual(result["revision"], state_revision(adapter.state))
+        self.assertEqual(adapter.writes, 1)
+
+    def test_audit_exception_is_partial_for_each_action(self):
+        def broken(event):
+            raise OSError("private-canary")
+        for action in ("create", "pause", "resume", "complete"):
+            with self.subTest(action=action):
+                state = None if action == "create" else new_state()
+                if action == "resume":
+                    state = new_state(status="paused", paused_reason="agent:wait")
+                adapter = FakeAdapter(state=state)
+                adapter.audit = broken
+                args = {"action": action}
+                if action == "create":
+                    args["contract"] = contract()
+                else:
+                    args["expected_revision"] = state_revision(state)
+                    args["evidence" if action == "complete" else "reason"] = "proof"
+                result = GoalService(adapter).handle(args)
+                self.assertFalse(result["ok"])
+                self.assertEqual(result["outcome"], "partial")
+                self.assertEqual(result["changed"], action != "complete")
+                self.assertEqual(adapter.writes, int(action != "complete"))
+                self.assertNotIn("private-canary", str(result))
+
+    def test_audit_failure_with_failed_read_is_unknown(self):
+        adapter = FakeAdapter()
+        def broken(event):
+            adapter.load = lambda: None
+            return False
+        adapter.audit = broken
+        result = GoalService(adapter).handle({"action": "create", "contract": contract()})
+        self.assertEqual(result["outcome"], "unknown")
+        self.assertIsNone(result["state"])
+        self.assertIsNone(result["revision"])
+        self.assertIsNone(result["changed"])
+        self.assertIsNone(result["todo_binding"])
+
     def test_status_without_goal_is_read_only(self):
         adapter = FakeAdapter()
         result = GoalService(adapter).handle({"action": "status"})
@@ -386,6 +435,16 @@ class ServiceTest(unittest.TestCase):
                 "action": "complete", "expected_revision": state_revision(state), "evidence": "done",
             })
         self.assertEqual(ctx.exception.code, "goal_not_active")
+
+    def test_complete_persists_evidence(self):
+        state = new_state()
+        adapter = FakeAdapter(state=state)
+        evidence = "tests: verified; report.csv"
+        GoalService(adapter).handle({"action": "complete",
+            "expected_revision": state_revision(state), "evidence": evidence})
+        self.assertEqual(adapter.audits[-1].get("evidence"), evidence)
+        self.assertEqual(adapter.state, state)
+        self.assertEqual(adapter.writes, 0)
 
     def test_complete_requires_evidence(self):
         state = new_state()

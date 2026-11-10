@@ -53,9 +53,10 @@ WAIT_FIELDS = ("waiting_on_pid", "waiting_on_session", "waiting_until", "waiting
 class GoalError(Exception):
     """A refused operation with a stable machine-readable code."""
 
-    def __init__(self, code: str, message: str):
+    def __init__(self, code: str, message: str, *, details=None):
         super().__init__(message)
         self.code = code
+        self.details = details or {}
 
     def to_dict(self) -> dict[str, str]:
         return {"code": self.code, "message": str(self)}
@@ -176,33 +177,55 @@ class GoalService:
             )
 
     def _readback(self, expected: dict[str, Any], fields: tuple[str, ...]) -> dict[str, Any]:
-        confirmed = self._state()
-        if confirmed is None:
-            raise GoalError("persistence_unverified", "the goal could not be read back after the write")
-        for field in fields:
-            if confirmed.get(field) != expected.get(field):
-                raise GoalError(
-                    "persistence_unverified",
-                    f"the host did not persist {field!r}; treat the outcome as unknown and report it",
-                )
+        try:
+            confirmed = self._state()
+        except Exception:
+            confirmed = None
+        if confirmed is None or any(confirmed.get(field) != expected.get(field) for field in fields):
+            raise GoalError(
+                "persistence_unverified",
+                "Native mutation could not be verified; do not retry automatically.",
+                details={"outcome": "unknown", "changed": None, "native_status": "unknown",
+                         "audit_status": "not_attempted", "state": _project(confirmed),
+                         "revision": state_revision(confirmed) if confirmed is not None else None,
+                         "todo_binding": None},
+            )
         return confirmed
 
-    def _audit(self, event: str, *,
-               before: dict[str, Any] | None = None,
-               after: dict[str, Any] | None = None,
-               reason: str = "",
-               todo_revision: int | None = None,
-               todo_ids: list[str] | None = None) -> None:
-        key = self._adapter.session_key() or ""
-        self._adapter.audit({
-            "event": event,
-            "session_key_hash": hashlib.sha256(key.encode("utf-8")).hexdigest()[:16] if key else "",
-            "reason": reason,
-            "todo_revision": todo_revision,
-            "todo_ids": list(todo_ids or []),
-            "before": _project(before),
-            "after": _project(after),
-        })
+    def _audit(self, event, *, before=None, after=None, reason="",
+               todo_revision=None, todo_ids=None, evidence="") -> bool:
+        try:
+            key = self._adapter.session_key() or ""
+            return self._adapter.audit({
+                "event": event,
+                "session_key_hash": hashlib.sha256(key.encode("utf-8")).hexdigest()[:16] if key else "",
+                "reason": reason, "todo_revision": todo_revision,
+                "todo_ids": list(todo_ids or []),
+                "before": _project(before), "after": _project(after),
+                **({"evidence": evidence} if event == "complete_requested" else {}),
+            }) is True
+        except Exception:
+            return False
+
+    def _finish(self, action, state, *, changed, audit_ok, **extra):
+        result = self._result(action, state, changed=changed, **extra)
+        result["audit_status"] = "confirmed" if audit_ok else "failed"
+        if audit_ok:
+            return result
+        try:
+            actual = self._state()
+        except Exception:
+            actual = None
+        if actual is None:
+            result.update(state=None, revision=None, changed=None,
+                          native_status="unknown", outcome="unknown")
+        else:
+            result.update(state=_project(actual), revision=state_revision(actual),
+                          native_status="confirmed", outcome="partial")
+        result.update(ok=False, todo_binding=None,
+                      error={"code": "audit_unverified", "message":
+                             "Native state may already have changed; do not retry automatically."})
+        return result
 
     def _result(self, action: str, state: dict[str, Any] | None, *, changed: bool,
                 notice: str = "", **extra: Any) -> dict[str, Any]:
@@ -258,13 +281,13 @@ class GoalService:
             {"goal": outcome, "contract": prepared["contract"], "status": "active"},
             ("goal", "contract", "status"),
         )
-        self._audit("create", after=confirmed, todo_revision=prepared["todo_revision"],
+        audit_ok = self._audit("create", after=confirmed, todo_revision=prepared["todo_revision"],
                     todo_ids=prepared["todo_ids"])
-        result = self._result(
-            "create", confirmed, changed=True,
+        result = self._finish(
+            "create", confirmed, changed=True, audit_ok=audit_ok,
             notice="goal created; Hermes continues and judges it after each turn against this contract",
         )
-        if prepared["todo_revision"] is not None:
+        if audit_ok and prepared["todo_revision"] is not None:
             result["todo_binding"] = {"revision": prepared["todo_revision"], "ids": prepared["todo_ids"]}
         return result
 
@@ -306,9 +329,9 @@ class GoalService:
              "gates": state.get("gates")},
             ("status", "paused_reason", "turns_used", "subgoals", "gates"),
         )
-        self._audit("pause", before=state, after=confirmed, reason=reason)
-        return self._result(
-            "pause", confirmed, changed=True,
+        audit_ok = self._audit("pause", before=state, after=confirmed, reason=reason)
+        return self._finish(
+            "pause", confirmed, changed=True, audit_ok=audit_ok,
             notice="goal paused: no further automatic continuation. The current tool call and "
                    "any running process were not interrupted.",
         )
@@ -344,9 +367,9 @@ class GoalService:
              "subgoals": state.get("subgoals"), "gates": state.get("gates")},
             ("status", "paused_reason", "turns_used", "max_turns", "subgoals", "gates"),
         )
-        self._audit("resume", before=state, after=confirmed, reason=reason)
-        return self._result(
-            "resume", confirmed, changed=True,
+        audit_ok = self._audit("resume", before=state, after=confirmed, reason=reason)
+        return self._finish(
+            "resume", confirmed, changed=True, audit_ok=audit_ok,
             notice="goal resumed with the remaining budget preserved; Hermes will continue "
                    "after this turn and judge the result against the contract",
         )
@@ -361,9 +384,9 @@ class GoalService:
                 f"the goal is {state.get('status')}; completion can only be requested for an "
                 "active goal",
             )
-        self._audit("complete_requested", before=state, after=state, reason="", )
-        return self._result(
-            "complete", state, changed=False,
+        audit_ok = self._audit("complete_requested", before=state, after=state, evidence=evidence)
+        return self._finish(
+            "complete", state, changed=False, audit_ok=audit_ok,
             verification_status="pending",
             evidence=evidence,
             notice="completion requested, not granted: put this evidence in your reply. The "
