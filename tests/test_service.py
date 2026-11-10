@@ -281,6 +281,41 @@ class ServiceTest(unittest.TestCase):
         self.assertEqual(adapter.state["paused_reason"], "user-paused")
         self.assertEqual(adapter.writes, 0)
 
+    def test_resume_refuses_user_pause(self):
+        state = new_state(status="paused", paused_reason="user-paused")
+        adapter = FakeAdapter(state=state)
+        with self.assertRaises(GoalError) as caught:
+            GoalService(adapter).handle({
+                "action": "resume", "expected_revision": state_revision(state),
+                "reason": "the user agreed",
+            })
+        self.assertEqual(caught.exception.code, "pause_not_resumable")
+        self.assertEqual(adapter.state, state)
+        self.assertEqual(adapter.writes, 0)
+        self.assertEqual(adapter.audits, [])
+
+    def test_resume_refuses_unowned_pause(self):
+        for reason in (None, "", "agent:", "agent:  ", "unknown", "gate-failed"):
+            with self.subTest(reason=reason):
+                state = new_state(status="paused", paused_reason=reason)
+                adapter = FakeAdapter(state=state)
+                with self.assertRaises(GoalError) as caught:
+                    GoalService(adapter).handle({"action": "resume",
+                        "expected_revision": state_revision(state), "reason": "go"})
+                self.assertEqual(caught.exception.code, "pause_not_resumable")
+                self.assertEqual(adapter.state, state)
+                self.assertEqual(adapter.writes, 0)
+
+    def test_resume_refuses_exhausted_agent_budget(self):
+        state = new_state(status="paused", paused_reason="agent:waiting", turns_used=20)
+        adapter = FakeAdapter(state=state)
+        with self.assertRaises(GoalError) as caught:
+            GoalService(adapter).handle({"action": "resume",
+                "expected_revision": state_revision(state), "reason": "go"})
+        self.assertEqual(caught.exception.code, "pause_not_resumable")
+        self.assertEqual(adapter.state, state)
+        self.assertEqual(adapter.writes, 0)
+
     def test_resume_preserves_turns_used(self):
         state = new_state(status="paused", paused_reason="agent:waiting")
         adapter = FakeAdapter(state=state)

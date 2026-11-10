@@ -334,14 +334,17 @@ class GoalService:
                 "the goal is parked on a wait barrier (process, child or deadline); "
                 "resolving that is the user's decision, not a resume",
             )
-        paused_reason = str(state.get("paused_reason") or "")
-        if paused_reason and not (paused_reason == "user-paused"
-                                  or paused_reason.startswith(AGENT_PAUSE_PREFIX)):
+        paused_reason = state.get("paused_reason")
+        if (not isinstance(paused_reason, str)
+                or not paused_reason.startswith(AGENT_PAUSE_PREFIX)
+                or not paused_reason[len(AGENT_PAUSE_PREFIX):].strip()):
             raise GoalError(
                 "pause_not_resumable",
-                f"the goal stopped for {paused_reason!r}; that needs an explicit user decision "
-                "and a fresh budget, not an automatic resume",
+                "Only an agent-owned pause can be resumed by this tool; "
+                "user, unknown, gate and budget pauses require native user control.",
             )
+        if state.get("turns_used", 0) >= state.get("max_turns", 0):
+            raise GoalError("pause_not_resumable", "The remaining goal budget is exhausted.")
         self._adapter.resume()
         confirmed = self._readback(
             {"status": "active", "paused_reason": None,
