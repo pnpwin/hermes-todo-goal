@@ -25,25 +25,25 @@ reply — slash commands are user actions, not tool calls.
 ## When to Use
 
 - Directly requested, verifiable work likely to need continuation across turns →
-  read `status`, then `create` only if no live Goal would be replaced. Multiple
-  tool calls alone do not justify a Goal. Automatic activation is not qualified
-  until the host CAS gate is closed; this guidance is not a capability grant.
+  read `status`, then `create` only when state is null. Multiple tool calls alone
+  do not justify a Goal. Any existing record (including done/cleared) blocks a new
+  creation. This create-once policy does not require modifying Hermes core.
 - The user says "just make a plan", "discuss", "explain", or asks a single question
   → do **not** create a goal; answer or use `todo_list` only.
 - A short task you can finish in this turn with evidence → do **not** create a goal;
   the extra continuation loop only adds budget risk.
 - The result criteria changed → ask the user to change the native goal contract.
-  `update` only accepts an identical contract as a read-only no-op; never clear/recreate
-  a live goal to bypass `contract_change_requires_user`.
-- New external information is needed and the user must decide → `pause`.
-- The answer/event that an agent-owned pause awaited has arrived → read `status`,
-  then `resume` only if the pause is agent-owned, budget remains and no wait exists.
-  A user-owned pause must be resumed through native user control, not this tool.
+  `update`, `pause` and `resume` are disabled (`action_disabled`). Never clear/recreate
+  a goal to bypass this restriction.
+- External information or a user decision is needed → report the blocker and ask
+  the user to manage the goal through native controls. Never resume a paused goal.
 - You believe the result exists → `complete` with evidence.
 
 ## Procedure
 
-1. Decide whether a goal is warranted (see above). If not, stop here.
+1. Decide whether a goal is warranted (see above). If not, stop here. Read `status`;
+   create only if state is null. If a goal already exists, use it only when the task
+   matches its contract; otherwise ask the user. Never recreate a done/cleared goal.
 2. Write the five-field contract from the request, not from your plan:
    `outcome`, `verification`, `constraints`, `boundaries`, `stop_when`.
    - `outcome` — what must exist at the end.
@@ -57,8 +57,8 @@ reply — slash commands are user actions, not tool calls.
 3. If a plan exists, call `todo_list` and keep its `revision`. Then `create` with
    `expected_todo_revision`. The plan is bound for audit only, from the latest
    exactly paired persisted transcript result, not a live TodoStore accessor.
-4. Read `revision` from the `create` result and keep it. Every later mutation needs
-   the current revision; re-read with `status` when a call reports `revision_stale`.
+4. Read `revision` from the result. Before `complete`, read status again and use
+   its revision; the native continuation engine may have changed the state.
 5. Work the plan, updating `todo_list` as you go. Todo updates never require a goal
    update and must not reset the goal.
 6. When you think the result exists, run the verification you wrote down, then call
@@ -70,28 +70,27 @@ reply — slash commands are user actions, not tool calls.
 
 - **Do not create a goal for planning-only or question-only requests.** The user
   asked for an answer, not a background loop.
-- **Do not use `create` to replace a live goal.** It refuses; that refusal is
+- **Do not use `create` to replace any goal record, including done/cleared.** It refuses; that refusal is
   correct. Ask the user how to handle the existing goal; do not overwrite it or
   clear/recreate it as a workaround for the contract-change refusal.
 - **`complete` is a request, not a verdict.** If the response says
   `verification_status: pending`, the goal is still active: say exactly that, report
   what you verified, and let the next turn-boundary check run.
 - **Never claim done from your own todo checkboxes.** Evidence is output, not intent.
-- **Respect a pause.** If a call reports `pause_not_resumable` or `wait_barrier`,
-  the stop came from the budget, a failed gate, a parked process or the user.
-  Surface it and ask; do not look for a way around it.
+- **Respect a pause.** Native state may stop on budget, gates, waits or user choice.
+  Surface it and ask; do not work around it. All lifecycle writes are disabled.
 - **Delegation and subagents do not inherit the goal.** Only the session that owns
   the goal can change it; a child call is refused by design.
-- **`update` does not grant new budget.** If the goal hit `max_turns`, changing the
-  contract will not extend it.
+- **No budget reset.** This tool has no lifecycle mutation or budget-grant action.
 
 - **Partial/unknown is not success.** On `audit_unverified` or
   `persistence_unverified`, read status and report the actual state and uncertainty.
   Never automatically repeat a mutation. Corrupt audit is not an absent Goal.
 - **Keep evidence task-scoped.** Completion evidence is persisted in the audit;
   do not include credentials or unrelated transcript contents.
-- **Readback is not atomicity.** This local candidate has no qualified shared host
-  CAS. Automatic activation and claims of UI/judge race safety remain blocked.
+- **Readback is not atomicity.** Initial creation can race with a native UI writer.
+  Do not manage the Goal concurrently. Opt-in guidance is not a concurrency guarantee;
+  model-level benefit and live continuation need separate empirical verification.
 
 ## Verification
 

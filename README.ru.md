@@ -3,12 +3,13 @@
 [English](README.md) · **Русский**
 
 Инструмент `goal_control`: LLM управляет Goal **текущего чата** без ручного `/goal` —
-создание, чтение, изменение, пауза, продолжение и запрос проверенного завершения.
-TODO необязателен.
+однократное создание, чтение статуса и передача evidence для завершения.
+TODO необязателен. Изменение lifecycle остаётся за native user control.
 
 **Статус: локальный невыпущенный кандидат hardening. Эти изменения не установлены.**
-Общий native CAS для UI/judge/плагина остаётся внешней зависимостью.
-Автоматическая активация не квалифицирована; публикация и установка требуют отдельного разрешения.
+Plugin-only create-once заменяет прежний full-lifecycle/CAS план; ядро не меняется.
+Сохраняется риск конкурентного первоначального создания. Публикация и установка
+требуют отдельного разрешения; модельная польза и live continuation ещё не квалифицированы.
 
 ## Исторические проверки (не приёмка текущего кандидата)
 
@@ -52,19 +53,17 @@ Goal в Hermes — это **контракт результата**: пять п
 |---|---|---|
 | `status` | — | прочитать Goal, контракт и `revision`; ничего не пишет |
 | `create` | `contract`, `expected_todo_revision?` | создать Goal; независимо от TODO |
-| `update` | `contract`, `expected_revision` | только идентичный контракт (read-only no-op); замена требует native user control |
-| `pause` | `expected_revision`, `reason` | остановить автопродолжение (не прерывает текущий вызов) |
-| `resume` | `expected_revision`, `reason` | снять только непустую `agent:`-паузу при остатке бюджета и без wait barrier |
 | `complete` | `expected_revision`, `evidence` | запросить проверку; возвращает `verification_status: pending` |
 
 Полная семантика и коды ошибок: [skills/goal-workflow/references/tool-contract.md](skills/goal-workflow/references/tool-contract.md).
 
 ## Границы (сознательные)
 
-- `create` не заменяет живой Goal: другой контракт при `active`/`paused` →
-  `goal_exists`. Тот же контракт при `active` — идемпотентный no-op
-  (`changed: false`); завершённый (`done`) Goal можно заменить новым.
-- `resume` не обходит `budget`/gate/auth-остановки и не снимает wait barrier.
+- `create` требует отсутствия native record: active, paused, done и cleared
+  блокируют замену (`goal_exists`). Идентичный active create — только read-only
+  no-op (`changed:false`). Повреждённая/нечитаемая запись не считается отсутствием.
+- Старые `update`, `pause`, `resume` → `action_disabled`, без чтения/записи хоста.
+  Соответствующие mutation paths удалены из адаптера.
 - `complete` не ставит `done`: вердикт даёт штатный judge на границе хода, после
   прохождения gates. Доказательства нужно повторить в ответе — judge читает ответ,
   а не результат инструмента.
@@ -77,11 +76,8 @@ Goal в Hermes — это **контракт результата**: пять п
 
 ### Полномочия, аудит и незакрытая атомарность
 
-- Изменённый контракт в `update` → `contract_change_requires_user`. Доверенного
-  in-tool approval нет; `reason`/`approved` не являются разрешением. Нельзя обходить
-  отказ удалением/пересозданием живой цели.
-- Модель не снимает пользовательские, неизвестные, gate/budget-паузы. Префикс
-  `agent:` обозначает владельца паузы, но не доказывает ответ пользователя.
+- Изменение контракта, пауза и возобновление требуют native user control.
+  Ни reason, ни approved не дают полномочий; clear/recreate не является обходом.
 - TODO читается как последний точно спаренный persisted result по доверенному
   transcript ID. Это **не live TodoStore**; route key Goal и ID транскрипта различны.
 - Audit v1: `plugin-data/hermes-todo-goal/goals/<sha256[:32]>.json`. Binding привязан
@@ -97,17 +93,19 @@ Goal в Hermes — это **контракт результата**: пять п
 - При native success и audit failure: `ok:false`, `outcome:partial`, актуальные
   state/revision и `audit_status:failed`. Неудачный readback → `unknown`, nullable
   state/revision/changed. Прочитать status, сообщить неопределённость; **не повторять автоматически**.
-- Hash revision/readback не закрывают гонки с UI/judge и ABA. Полная автоматическая
-  активация заблокирована до общего native CAS.
+- Hash revision/readback не предотвращают гонки с UI/judge и ABA. Единственная
+  native-мутация — первоначальное создание. Последняя проверка перед записью не CAS:
+  одновременное создание через UI всё ещё может быть перезаписано. Нельзя управлять
+  Goal конкурентно; create-once не обещает общей защиты от гонок.
 
-### Автомаршрутизация остаётся выключенной
+### Opt-in create-once routing
 
 `plugins.entries.hermes-todo-goal.settings.auto_create` по умолчанию false.
-Нужны literal boolean true и квалифицированный общий native CAS. В этом кандидате
-capability намеренно unavailable: даже opt-in не добавит секцию на текущем host.
-Положительный unit-тест подставляет capability stub, а не доказывает delivery/E2E.
-Политика: прямой запрос на проверяемый результат, которому вероятно нужны несколько
-ходов, а не просто несколько tool calls. Существующая цель не переписывается автоматически.
+Literal boolean true регистрирует секцию на совместимом host, без CAS stub и
+правок ядра. Это не второй цикл и не разрешение менять lifecycle. Политика:
+прямой запрос на проверяемый результат, которому вероятно нужны несколько ходов,
+а не просто несколько tool calls. Прежний CAS blocker заменён более узким
+контрактом с явно указанным остаточным риском.
 
 ## Установка опубликованного релиза (не разрешение установить кандидата)
 
@@ -157,6 +155,14 @@ hermes plugins enable hermes-todo-goal
 - Если gateway не ответил (`restart_required`) — перезапуск: закрыть и открыть
   Hermes Desktop либо `hermes gateway restart`.
 
+## Блокировка первоначального создания
+
+Вызовы create одного профиля/сессии используют атомарное создание каталога
+`.create.lock` рядом с audit-файлом. Конкурентный вызов или недоступная блокировка
+дают `create_locked` до native-мутации. Оставшаяся после аварии блокировка не
+удаляется автоматически: нужна проверка оператором. Native UI/judge не используют
+эту блокировку; общий CAS и устранение гонки с ними не заявлены.
+
 ## Проверка
 
 Из корня каталога:
@@ -165,6 +171,7 @@ hermes plugins enable hermes-todo-goal
 # 1. Чистое ядро: контракт, политика, схема, регистрация (только stdlib)
 python3 -B -m unittest discover -s tests -p 'test_contract.py' -v
 python3 -B -m unittest discover -s tests -p 'test_service.py' -v
+python3 -B -m unittest discover -s tests -p 'test_create_once.py' -v
 python3 -B -m unittest discover -s tests -p 'test_plugin.py' -v
 python3 -B -m unittest discover -s tests -p 'test_todo_pairing.py' -v
 python3 -B -m unittest discover -s tests -p 'test_audit.py' -v
@@ -176,6 +183,13 @@ HERMES_DISABLE_LAZY_INSTALLS=1 HERMES_HOME=$(mktemp -d) \
   PYTHONPATH="$HERMES_AGENT_DIR" \
   "$HERMES_AGENT_DIR/venv/bin/python" -B -m unittest discover -s tests \
   -p 'test_desktop.py' -v
+
+# Дополнительная native-проверка доставки: настоящий AIAgent и SDK-сериализация,
+# перехват до HTTP; секция off/on, без inference и выводов о поведении модели.
+HERMES_DISABLE_LAZY_INSTALLS=1 HERMES_HOME=$(mktemp -d) \
+  PYTHONPATH="$HERMES_AGENT_DIR" \
+  "$HERMES_AGENT_DIR/venv/bin/python" -B -m unittest discover -s tests \
+  -p 'test_prompt_delivery.py' -v
 
 # 3. Пакетные проверки (без установки)
 hermes plugins validate . --json
@@ -194,8 +208,8 @@ PluginManager; реальную регистрацию проверяет `plugi
 - Реальная постановка следующего хода продолжением в живой сессии (проверен только путь
   принятия решения).
 - Другие поверхности (Telegram, ACP, Kanban-воркеры) — не прогонялись.
-- Гонка «пользовательская пауза ровно в момент update» на настоящем UI: юнит-тест
-  проверяет сверку поколения, но не межпроцессную блокировку.
+- Гонка первоначального create с native UI: общий CAS не заявлен.
+- Модельный A/B эффект новой create-once policy.
 
 ## Структура
 

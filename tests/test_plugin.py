@@ -64,10 +64,12 @@ class SchemaTest(unittest.TestCase):
         self.assertEqual(GOAL_SCHEMA["name"], "goal_control")
         self.assertEqual(plugin.TOOL_NAME, "goal_control")
 
-    def test_schema_exposes_six_actions(self):
-        action = GOAL_SCHEMA["parameters"]["properties"]["action"]
-        self.assertEqual(action["enum"],
-                         ["status", "create", "update", "pause", "resume", "complete"])
+    def test_schema_exposes_three_actions(self):
+        self.assertEqual(GOAL_SCHEMA["parameters"]["properties"]["action"]["enum"],
+                         ["status", "create", "complete"])
+
+    def test_schema_does_not_advertise_lifecycle_reason(self):
+        self.assertNotIn("reason", GOAL_SCHEMA["parameters"]["properties"])
 
     def test_schema_forbids_unknown_arguments(self):
         params = GOAL_SCHEMA["parameters"]
@@ -105,8 +107,8 @@ class HandlerTest(unittest.TestCase):
 
     def test_missing_goal_is_reported_as_json(self):
         handler = plugin.build_handler(lambda: StubAdapter(state=None))
-        result = json.loads(handler({"action": "pause", "expected_revision": "none",
-                                     "reason": "x"}))
+        result = json.loads(handler({"action": "complete", "expected_revision": "none",
+                                     "evidence": "x"}))
         self.assertFalse(result["ok"])
         self.assertEqual(result["error"]["code"], "no_goal")
 
@@ -153,7 +155,7 @@ class HandlerTest(unittest.TestCase):
             def _store(self, state):
                 super()._store(state)
                 raise OSError("private-write-error")
-        for action in ("create", "pause", "resume"):
+        for action in ("create",):
             with self.subTest(action=action):
                 state = None if action == "create" else new_state()
                 if action == "resume":
@@ -196,26 +198,22 @@ class RegistrationTest(unittest.TestCase):
         self.assertNotIn("status` first, then `update", plugin.SECTION_TEXT)
         self.assertLessEqual(len(plugin.SECTION_TEXT), 2000)
 
-    def test_routing_requires_literal_opt_in_and_qualified_host(self):
-        for setting, capability, expected in ((True, True, 1), (True, False, 0),
-                                             ("true", True, 0), (1, True, 0), (False, True, 0)):
-            with self.subTest(setting=setting, capability=capability):
+    def test_routing_requires_literal_opt_in(self):
+        for setting, expected in ((True, 1), (False, 0), ("true", 0), (1, 0), (None, 0)):
+            with self.subTest(setting=setting):
                 ctx = RecordingContext({"auto_create": setting})
-                with mock.patch("src.desktop.missing_symbols", return_value=[]), mock.patch(
-                    "src.plugin._atomicity_available", return_value=capability):
+                with mock.patch("src.desktop.missing_symbols", return_value=[]):
                     plugin.register(ctx)
                 self.assertEqual(len(ctx.sections), expected)
                 self.assertIn("goal_control", ctx.tools)
-                if expected:
-                    self.assertEqual(ctx.sections[0], ((plugin.SECTION_ID, plugin.SECTION_TEXT),
-                                     {"position": "after_memory", "max_chars": 2000}))
 
-    def test_production_atomicity_probe_is_not_a_config_override(self):
-        self.assertFalse(plugin._atomicity_available())
-        ctx = RecordingContext({"auto_create": True, "atomicity_available": True})
+    def test_create_once_opt_in_does_not_require_core_cas(self):
+        ctx = RecordingContext({"auto_create": True})
         with mock.patch("src.desktop.missing_symbols", return_value=[]):
             plugin.register(ctx)
-        self.assertEqual(ctx.sections, [])
+        self.assertEqual(len(ctx.sections), 1)
+        self.assertEqual(ctx.sections[0], ((plugin.SECTION_ID, plugin.SECTION_TEXT),
+                                         {"position": "after_memory", "max_chars": 2000}))
 
     def test_older_context_keeps_tool_and_skill(self):
         ctx = RecordingContext({"auto_create": True})
@@ -227,8 +225,7 @@ class RegistrationTest(unittest.TestCase):
 
     def test_incompatible_host_never_registers_guidance(self):
         ctx = RecordingContext({"auto_create": True})
-        with mock.patch("src.desktop.missing_symbols", return_value=["missing"]), mock.patch(
-            "src.plugin._atomicity_available", return_value=True):
+        with mock.patch("src.desktop.missing_symbols", return_value=["missing"]):
             plugin.register(ctx)
         self.assertEqual(ctx.sections, [])
 
@@ -237,8 +234,7 @@ class RegistrationTest(unittest.TestCase):
             with self.subTest(failure=failure):
                 ctx = RecordingContext({"auto_create": True})
                 ctx.register_system_prompt_section = mock.Mock(side_effect=failure("private-canary"))
-                with mock.patch("src.desktop.missing_symbols", return_value=[]), mock.patch(
-                    "src.plugin._atomicity_available", return_value=True), self.assertLogs(
+                with mock.patch("src.desktop.missing_symbols", return_value=[]), self.assertLogs(
                     "src.plugin", level="WARNING") as captured:
                     plugin.register(ctx)
                 self.assertIn("goal_control", ctx.tools)

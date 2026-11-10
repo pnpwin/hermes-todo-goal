@@ -2,16 +2,17 @@
 
 ## Unreleased — local hardening, not deployed
 
-- Refuse user/unknown pauses, exhausted agent budgets and unapproved contract changes.
+- Adopt plugin-only create-once: expose status/create/complete; all legacy update,
+  pause and resume calls refuse. Never replace done/cleared/unreadable native records.
 - Separate trusted transcript IDs from Goal route keys; deny delegated child use.
 - Require exact TODO call-result provenance; preserve authoritative clears.
 - Report partial/unknown native/audit effects without automatic retries.
 - Persist completion evidence and generation-bound TODO binding in audit format v1;
   read without mutation, serialize audit writers and retain corrupt journals.
-- Shared native CAS remains a release/automatic-activation blocker. Historical
-  verification below does not qualify the current candidate; no version bump.
-- Add default-off long-running routing policy. Production capability stays false
-  until shared native CAS is qualified; opt-in alone cannot activate it.
+- Supersede the shared-CAS plan with the owner-approved reduced contract; no core
+  changes. Initial create still races with simultaneous native UI writes.
+- Default-off routing registers with literal true on a compatible host. No invented
+  CAS capability. Historical verification does not qualify this candidate; no version bump.
 - Correct the old blanket CLI/`-z` claim: continuation depends on the actual
   execution owner; direct judge invocation is not live next-turn acceptance.
 

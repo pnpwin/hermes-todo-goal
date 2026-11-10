@@ -16,21 +16,17 @@ TODO — изменяемый план; Goal — контракт результ
 ## Полномочия и lifecycle
 
 - `status` читает native state и audit binding; не создаёт/исправляет audit-файлы.
-- `create` не заменяет active/paused Goal; идентичный active — no-op.
-  После done/cleared новая цель разрешена.
-- `update` принимает только идентичный контракт как read-only no-op. Любое изменение
-  даёт contract_change_requires_user: trusted in-tool approval API отсутствует.
-  Ни reason, ни approved=true не дают полномочий. Обход через clear/create запрещён.
-- `pause` добавляет agent: к причине, не переписывает пользовательскую паузу,
-  не прерывает текущий вызов/процесс.
-- `resume` разрешён только для непустой agent:-паузы, при остатке бюджета и без wait.
-  user-paused/unknown/gate/budget-паузы запрещены. Native reset_budget=False.
-  Префикс agent: не доказывает поступление ответа пользователя.
+- `create` требует полного отсутствия native record. Done/cleared также блокируют
+  замену. Идентичный active create — read-only no-op. Unreadable/corrupt native record
+  даёт state_unreadable; недоступный store не считается отсутствующим Goal.
+- `update`/`pause`/`resume` → action_disabled до обращения к хосту. Их native mutation
+  paths удалены. Контракт, паузы, бюджет и lifecycle управляются native user control.
+  Ни reason, ни approved=true не дают полномочий; обход через clear/create запрещён.
 - `complete` только для active, сохраняет evidence (до 4000 символов) и возвращает
   pending. Не вызывает judge и не ставит done. Evidence повторяется в ответе;
   native judge и gates остаются владельцами завершения.
 - Модель не задаёт session_id/profile/home/db_path/approved/force/reset_budget/gates.
-  Обязательная expected_revision для update/pause/resume/complete — fingerprint
+  Обязательная expected_revision для complete — fingerprint
   полного native snapshot, НЕ атомарная ревизия и НЕ защита от ABA.
 
 ## Идентичность и TODO
@@ -72,19 +68,20 @@ native state и audit_status:failed/warning/null binding. Аудит не GoalSt
 
 ## Offline routing policy
 
-`settings.auto_create` — bool, default false; секция требует true и квалифицированный
-host CAS. Текущий production probe всегда False до companion implementation и
-all-writer acceptance. Ни config, ни test stub не включают native capability.
-Policy согласована с tool description и skill: direct verifiable long-running
-work, не вопросы/планы/короткие задачи. Native request delivery ещё не проверена.
+`settings.auto_create` — bool, default false. Literal true регистрирует секцию на
+совместимом host. CAS dependency снята по выбору пользователя: это plugin-only
+create-once, без права изменять ядро или runtime-конфиги. Policy согласована с schema
+и skill: direct verifiable long-running work, не вопросы/планы/короткие задачи.
 
 ## Граница полной приёмки
 
-Общий native CAS, включая UI/judge/clear/migration/continuation и ABA, не реализован
-плагином. Автоактивация заблокирована; локальный mutex аудита эту зависимость
-не закрывает. Companion change ядра требует отдельного разрешения.
+Единственная native-мутация — создание при отсутствии записи. Последний preflight
+не атомарен с native UI writer: одновременное создание всё ещё может конфликтовать.
+Readback и audit lock этого не устраняют. Изолированные прогоны требуют отсутствия
+конкурентного UI управления Goal. Нельзя выдавать их за all-writer/ABA safety.
+Старый companion-CAS план superseded; изменение ядра пользователем запрещено.
 
-Текущие offline suites: contract, service, plugin, todo_pairing, audit; native
+Текущие offline suites: contract, service, create_once, plugin, todo_pairing, audit; native
 suite: test_desktop.py, реальный dispatch/GoalManager/SessionDB на synthetic homes.
 CI перечисляет только pure suites; локальный запуск не означает remote CI.
 Модельный E2E, delivery полного prompt, live requeue/consumed continuation и A/B

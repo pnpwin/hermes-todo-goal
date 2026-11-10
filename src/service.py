@@ -7,10 +7,9 @@ marks a goal done on the model's word.
 
 Design invariants (each is covered by a test in ``tests/test_service.py``):
 
-* :meth:`GoalService.handle_status` is read-only.
-* ``create`` never replaces a live goal; ``update`` only permits an identical
-  contract no-op; ``pause`` never relabels a user pause; ``resume``
-  never resets the turn budget; ``complete`` only *requests* verification.
+* ``status`` is read-only; ``create`` requires no native record (including cleared).
+* ``update``/``pause``/``resume`` refuse before host access. Only native user control
+  may change existing goals; ``complete`` records evidence without native mutation.
 * Every mutation is re-read from the host and compared field by field, because a
   silently dropped write must not be reported as success.
 * The model cannot choose a session, profile, database or approval flag: any
@@ -25,28 +24,17 @@ from typing import Any, Protocol
 
 from .contract import ContractError, prepare_goal
 
-ACTIONS = ("status", "create", "update", "pause", "resume", "complete")
+ACTIONS = ("status", "create", "complete")
+DISABLED_ACTIONS = frozenset({"update", "pause", "resume"})
 
 ALLOWED_ARGS: dict[str, frozenset[str]] = {
     "status": frozenset(),
     "create": frozenset({"contract", "expected_todo_revision"}),
-    "update": frozenset({"contract", "expected_revision"}),
-    "pause": frozenset({"reason", "expected_revision"}),
-    "resume": frozenset({"reason", "expected_revision"}),
     "complete": frozenset({"evidence", "expected_revision"}),
 }
 
-AGENT_PAUSE_PREFIX = "agent:"
-LIVE_STATUSES = frozenset({"active", "paused"})
-MAX_REASON_CHARS = 500
 MAX_EVIDENCE_CHARS = 4000
 
-#: Fields ``update`` must not disturb. The host re-read is compared on these.
-PRESERVED_ON_UPDATE = (
-    "status", "turns_used", "max_turns", "created_at", "last_turn_at",
-    "subgoals", "gates", "paused_reason", "waiting_on_pid", "waiting_on_session",
-    "waiting_until", "waiting_on_delegations", "waiting_reason", "waiting_since",
-)
 WAIT_FIELDS = ("waiting_on_pid", "waiting_on_session", "waiting_until", "waiting_on_delegations")
 
 
@@ -76,13 +64,6 @@ class HostAdapter(Protocol):
 
     def create(self, outcome: str, contract: dict[str, str]) -> dict[str, Any]: ...
 
-    def replace_contract(
-        self, snapshot: dict[str, Any], outcome: str, contract: dict[str, str]
-    ) -> dict[str, Any]: ...
-
-    def pause(self, reason: str) -> dict[str, Any]: ...
-
-    def resume(self) -> dict[str, Any]: ...
 
     def todo_snapshot(self) -> dict[str, Any] | None: ...
 
@@ -119,14 +100,6 @@ def _project(snapshot: dict[str, Any] | None) -> dict[str, Any] | None:
     return {key: snapshot.get(key) for key in keys}
 
 
-def _wait_active(snapshot: dict[str, Any]) -> bool:
-    if snapshot.get("waiting_on_pid") or snapshot.get("waiting_on_session"):
-        return True
-    if snapshot.get("waiting_on_delegations"):
-        return True
-    return bool(snapshot.get("waiting_until"))
-
-
 def _prepare(todo_snapshot, contract, expected_revision=None):
     try:
         return prepare_goal(todo_snapshot, contract, expected_revision)
@@ -143,6 +116,10 @@ class GoalService:
         if not isinstance(args, dict):
             raise GoalError("args_invalid", "arguments must be an object")
         action = args.get("action")
+        if isinstance(action, str) and action in DISABLED_ACTIONS:
+            raise GoalError("action_disabled",
+                            "Create-once mode does not modify existing goals. "
+                            "Use native user control; do not clear/recreate as a workaround.")
         if not isinstance(action, str) or action not in ACTIONS:
             raise GoalError("unknown_action", f"action must be one of {', '.join(ACTIONS)}")
         unknown = set(args) - ALLOWED_ARGS[action] - {"action"}
@@ -294,7 +271,7 @@ class GoalService:
         outcome = prepared["contract"]["outcome"]
 
         state = self._state()
-        if state is not None and state.get("status") in LIVE_STATUSES:
+        if state is not None:
             same = (state.get("goal") == outcome
                     and (state.get("contract") or {}) == prepared["contract"])
             if same and state.get("status") == "active":
@@ -305,7 +282,8 @@ class GoalService:
             raise GoalError(
                 "goal_exists",
                 f"this session already has a {state.get('status')} goal; "
-                "update it, resume it, or ask the user to clear it before creating another",
+                "create-once never replaces a record, including done/cleared goals. "
+                "Use native user control or a new chat; do not retry or clear it as a workaround.",
             )
 
         self._mutate(lambda: self._adapter.create(outcome, prepared["contract"]))
@@ -323,92 +301,6 @@ class GoalService:
             result["todo_binding"] = {"revision": prepared["todo_revision"], "ids": prepared["todo_ids"]}
         return result
 
-    def _action_update(self, args: dict[str, Any]) -> dict[str, Any]:
-        state = self._require_state()
-        if state.get("status") not in LIVE_STATUSES:
-            raise GoalError(
-                "goal_not_live",
-                f"the goal is {state.get('status')}, so its contract is closed; create a new goal instead",
-            )
-        self._require_revision(args, state)
-        prepared = _prepare(None, args.get("contract"))
-        outcome = prepared["contract"]["outcome"]
-        if state.get("goal") == outcome and (state.get("contract") or {}) == prepared["contract"]:
-            return self._result("update", state, changed=False,
-                                notice="the goal already carries this exact outcome and contract")
-
-        raise GoalError(
-            "contract_change_requires_user",
-            "This host has no trusted in-tool contract approval channel. "
-            "Ask the user to change the contract through native goal control; "
-            "do not replace or clear the goal as a workaround.",
-        )
-
-    def _action_pause(self, args: dict[str, Any]) -> dict[str, Any]:
-        state = self._require_state()
-        self._require_revision(args, state)
-        reason = _text_arg(args, "reason", MAX_REASON_CHARS)
-        if state.get("status") == "paused":
-            return self._result("pause", state, changed=False,
-                                notice=f"the goal is already paused ({state.get('paused_reason')})")
-        if state.get("status") != "active":
-            raise GoalError("goal_not_active",
-                            f"only an active goal can be paused, not a {state.get('status')} one")
-        self._mutate(lambda: self._adapter.pause(f"{AGENT_PAUSE_PREFIX}{reason}"))
-        confirmed = self._readback(
-            {"status": "paused", "paused_reason": f"{AGENT_PAUSE_PREFIX}{reason}",
-             "turns_used": state.get("turns_used"), "subgoals": state.get("subgoals"),
-             "gates": state.get("gates"),
-             **{key: state.get(key) for key in ("max_turns", "goal", "contract", "created_at")}},
-            ("status", "paused_reason", "turns_used", "subgoals", "gates",
-             "max_turns", "goal", "contract", "created_at"),
-        )
-        audit_ok = self._audit("pause", before=state, after=confirmed, reason=reason)
-        return self._finish(
-            "pause", confirmed, changed=True, audit_ok=audit_ok,
-            notice="goal paused: no further automatic continuation. The current tool call and "
-                   "any running process were not interrupted.",
-        )
-
-    def _action_resume(self, args: dict[str, Any]) -> dict[str, Any]:
-        state = self._require_state()
-        self._require_revision(args, state)
-        reason = _text_arg(args, "reason", MAX_REASON_CHARS)
-        if state.get("status") != "paused":
-            raise GoalError("goal_not_paused",
-                            f"only a paused goal can be resumed, not a {state.get('status')} one")
-        if _wait_active(state):
-            raise GoalError(
-                "wait_barrier",
-                "the goal is parked on a wait barrier (process, child or deadline); "
-                "resolving that is the user's decision, not a resume",
-            )
-        paused_reason = state.get("paused_reason")
-        if (not isinstance(paused_reason, str)
-                or not paused_reason.startswith(AGENT_PAUSE_PREFIX)
-                or not paused_reason[len(AGENT_PAUSE_PREFIX):].strip()):
-            raise GoalError(
-                "pause_not_resumable",
-                "Only an agent-owned pause can be resumed by this tool; "
-                "user, unknown, gate and budget pauses require native user control.",
-            )
-        if state.get("turns_used", 0) >= state.get("max_turns", 0):
-            raise GoalError("pause_not_resumable", "The remaining goal budget is exhausted.")
-        self._mutate(self._adapter.resume)
-        confirmed = self._readback(
-            {"status": "active", "paused_reason": None,
-             "turns_used": state.get("turns_used"), "max_turns": state.get("max_turns"),
-             "subgoals": state.get("subgoals"), "gates": state.get("gates"),
-             **{key: state.get(key) for key in ("goal", "contract", "created_at")}},
-            ("status", "paused_reason", "turns_used", "max_turns", "subgoals", "gates",
-             "goal", "contract", "created_at"),
-        )
-        audit_ok = self._audit("resume", before=state, after=confirmed, reason=reason)
-        return self._finish(
-            "resume", confirmed, changed=True, audit_ok=audit_ok,
-            notice="goal resumed with the remaining budget preserved; Hermes will continue "
-                   "after this turn and judge the result against the contract",
-        )
 
     def _action_complete(self, args: dict[str, Any]) -> dict[str, Any]:
         state = self._require_state()

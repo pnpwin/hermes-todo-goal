@@ -133,7 +133,7 @@ class ServiceTest(unittest.TestCase):
     def test_audit_exception_is_partial_for_each_action(self):
         def broken(event):
             raise OSError("private-canary")
-        for action in ("create", "pause", "resume", "complete"):
+        for action in ("create", "complete"):
             with self.subTest(action=action):
                 state = None if action == "create" else new_state()
                 if action == "resume":
@@ -214,11 +214,14 @@ class ServiceTest(unittest.TestCase):
         self.assertEqual(adapter.writes, 0)
         self.assertEqual(adapter.state["turns_used"], 3)
 
-    def test_create_allowed_after_cleared(self):
-        adapter = FakeAdapter(state=new_state(status="cleared"))
-        result = GoalService(adapter).handle({"action": "create", "contract": contract()})
-        self.assertTrue(result["changed"])
-        self.assertEqual(adapter.state["status"], "active")
+    def test_create_refuses_after_cleared(self):
+        state = new_state(status="cleared")
+        adapter = FakeAdapter(state=state)
+        with self.assertRaises(GoalError) as caught:
+            GoalService(adapter).handle({"action": "create", "contract": contract()})
+        self.assertEqual(caught.exception.code, "goal_exists")
+        self.assertEqual(adapter.state, state)
+        self.assertEqual(adapter.writes, 0)
 
     def test_create_with_todo_binding(self):
         todos = {"revision": 5, "todos": [{"id": "a", "content": "x", "status": "pending"}]}
@@ -247,201 +250,6 @@ class ServiceTest(unittest.TestCase):
             })
         self.assertEqual(ctx.exception.code, "todo_unavailable")
 
-    def test_contract_change_requires_user_control(self):
-        state = new_state()
-        adapter = FakeAdapter(state=state)
-        with self.assertRaises(GoalError) as caught:
-            GoalService(adapter).handle({"action": "update",
-                "expected_revision": state_revision(state),
-                "contract": contract(verification="Explain why tests were skipped")})
-        self.assertEqual(caught.exception.code, "contract_change_requires_user")
-        self.assertEqual(adapter.state, state)
-        self.assertEqual(adapter.writes, 0)
-        self.assertEqual(adapter.audits, [])
-
-    def test_update_preserves_budget_subgoals_gates_and_wait(self):
-        state = new_state(waiting_on_pid=4242, waiting_reason="waiting")
-        adapter = FakeAdapter(state=state)
-        with self.assertRaises(GoalError) as caught:
-            GoalService(adapter).handle({
-                "action": "update", "expected_revision": state_revision(state),
-                "contract": contract(verification="New proof"),
-            })
-        self.assertEqual(caught.exception.code, "contract_change_requires_user")
-        self.assertEqual(adapter.writes, 0)
-        new = adapter.state
-        for key in ("turns_used", "max_turns", "created_at", "subgoals", "gates",
-                    "waiting_on_pid", "waiting_reason", "status"):
-            self.assertEqual(new[key], state[key], key)
-        self.assertEqual(new, state)
-        self.assertEqual(adapter.audits, [])
-
-    def test_update_requires_matching_revision(self):
-        adapter = FakeAdapter(state=new_state())
-        with self.assertRaises(GoalError) as ctx:
-            GoalService(adapter).handle({
-                "action": "update", "expected_revision": "stale", "contract": contract(),
-            })
-        self.assertEqual(ctx.exception.code, "revision_stale")
-        self.assertEqual(adapter.writes, 0)
-
-    def test_update_without_goal_is_rejected(self):
-        with self.assertRaises(GoalError) as ctx:
-            GoalService(FakeAdapter()).handle({
-                "action": "update", "expected_revision": "none", "contract": contract(),
-            })
-        self.assertEqual(ctx.exception.code, "no_goal")
-
-    def test_update_noop_does_not_write(self):
-        state = new_state()
-        adapter = FakeAdapter(state=state)
-        result = GoalService(adapter).handle({
-            "action": "update", "expected_revision": state_revision(state), "contract": contract(),
-        })
-        self.assertFalse(result["changed"])
-        self.assertEqual(adapter.writes, 0)
-
-    def test_pause_detects_lost_native_fields(self):
-        state = new_state()
-        adapter = FakeAdapter(state=state, drop_on_write={"gates"})
-        with self.assertRaises(GoalError) as ctx:
-            GoalService(adapter).handle({
-                "action": "pause", "expected_revision": state_revision(state),
-                "reason": "waiting",
-            })
-        self.assertEqual(ctx.exception.code, "persistence_unverified")
-
-    def test_pause_readback_rejects_lost_budget_or_contract_identity(self):
-        for field in ("max_turns", "goal", "contract", "created_at"):
-            with self.subTest(field=field):
-                state = new_state()
-                adapter = FakeAdapter(state=state, drop_on_write={field})
-                with self.assertRaises(GoalError) as caught:
-                    GoalService(adapter).handle({"action": "pause",
-                        "expected_revision": state_revision(state), "reason": "wait"})
-                self.assertEqual(caught.exception.code, "persistence_unverified")
-                self.assertEqual(adapter.audits, [])
-
-    def test_pause_marks_agent_reason_and_keeps_budget(self):
-        state = new_state()
-        adapter = FakeAdapter(state=state)
-        GoalService(adapter).handle({
-            "action": "pause", "expected_revision": state_revision(state), "reason": "waiting on user",
-        })
-        self.assertEqual(adapter.state["status"], "paused")
-        self.assertEqual(adapter.state["paused_reason"], "agent:waiting on user")
-        self.assertEqual(adapter.state["turns_used"], 3)
-
-    def test_pause_requires_reason(self):
-        state = new_state()
-        with self.assertRaises(GoalError) as ctx:
-            GoalService(FakeAdapter(state=state)).handle({
-                "action": "pause", "expected_revision": state_revision(state), "reason": "  ",
-            })
-        self.assertEqual(ctx.exception.code, "arg_missing")
-
-    def test_pause_refuses_unfinished_goal_states(self):
-        for status in ("done", "cleared"):
-            with self.subTest(status=status):
-                state = new_state(status=status)
-                with self.assertRaises(GoalError) as ctx:
-                    GoalService(FakeAdapter(state=state)).handle({
-                        "action": "pause", "expected_revision": state_revision(state),
-                        "reason": "x",
-                    })
-                self.assertEqual(ctx.exception.code, "goal_not_active")
-
-    def test_pause_keeps_user_pause_reason(self):
-        state = new_state(status="paused", paused_reason="user-paused")
-        adapter = FakeAdapter(state=state)
-        result = GoalService(adapter).handle({
-            "action": "pause", "expected_revision": state_revision(state), "reason": "again",
-        })
-        self.assertFalse(result["changed"])
-        self.assertEqual(adapter.state["paused_reason"], "user-paused")
-        self.assertEqual(adapter.writes, 0)
-
-    def test_resume_refuses_user_pause(self):
-        state = new_state(status="paused", paused_reason="user-paused")
-        adapter = FakeAdapter(state=state)
-        with self.assertRaises(GoalError) as caught:
-            GoalService(adapter).handle({
-                "action": "resume", "expected_revision": state_revision(state),
-                "reason": "the user agreed",
-            })
-        self.assertEqual(caught.exception.code, "pause_not_resumable")
-        self.assertEqual(adapter.state, state)
-        self.assertEqual(adapter.writes, 0)
-        self.assertEqual(adapter.audits, [])
-
-    def test_resume_refuses_unowned_pause(self):
-        for reason in (None, "", "agent:", "agent:  ", "unknown", "gate-failed"):
-            with self.subTest(reason=reason):
-                state = new_state(status="paused", paused_reason=reason)
-                adapter = FakeAdapter(state=state)
-                with self.assertRaises(GoalError) as caught:
-                    GoalService(adapter).handle({"action": "resume",
-                        "expected_revision": state_revision(state), "reason": "go"})
-                self.assertEqual(caught.exception.code, "pause_not_resumable")
-                self.assertEqual(adapter.state, state)
-                self.assertEqual(adapter.writes, 0)
-
-    def test_resume_refuses_exhausted_agent_budget(self):
-        state = new_state(status="paused", paused_reason="agent:waiting", turns_used=20)
-        adapter = FakeAdapter(state=state)
-        with self.assertRaises(GoalError) as caught:
-            GoalService(adapter).handle({"action": "resume",
-                "expected_revision": state_revision(state), "reason": "go"})
-        self.assertEqual(caught.exception.code, "pause_not_resumable")
-        self.assertEqual(adapter.state, state)
-        self.assertEqual(adapter.writes, 0)
-
-    def test_resume_readback_rejects_lost_contract_identity(self):
-        for field in ("goal", "contract", "created_at"):
-            with self.subTest(field=field):
-                state = new_state(status="paused", paused_reason="agent:wait")
-                adapter = FakeAdapter(state=state, drop_on_write={field})
-                with self.assertRaises(GoalError) as caught:
-                    GoalService(adapter).handle({"action": "resume",
-                        "expected_revision": state_revision(state), "reason": "go"})
-                self.assertEqual(caught.exception.code, "persistence_unverified")
-                self.assertEqual(adapter.audits, [])
-
-    def test_resume_preserves_turns_used(self):
-        state = new_state(status="paused", paused_reason="agent:waiting")
-        adapter = FakeAdapter(state=state)
-        result = GoalService(adapter).handle({
-            "action": "resume", "expected_revision": state_revision(state), "reason": "user agreed",
-        })
-        self.assertTrue(result["changed"])
-        self.assertEqual(adapter.state["status"], "active")
-        self.assertEqual(adapter.state["turns_used"], 3)
-        self.assertIsNone(adapter.state["paused_reason"])
-
-    def test_resume_refuses_budget_stop(self):
-        state = new_state(status="paused", paused_reason="budget-exhausted")
-        with self.assertRaises(GoalError) as ctx:
-            GoalService(FakeAdapter(state=state)).handle({
-                "action": "resume", "expected_revision": state_revision(state), "reason": "go on",
-            })
-        self.assertEqual(ctx.exception.code, "pause_not_resumable")
-
-    def test_resume_refuses_wait_barrier(self):
-        state = new_state(status="paused", paused_reason="agent:waiting-on-child",
-                          waiting_on_delegations=1)
-        with self.assertRaises(GoalError) as ctx:
-            GoalService(FakeAdapter(state=state)).handle({
-                "action": "resume", "expected_revision": state_revision(state), "reason": "go on",
-            })
-        self.assertEqual(ctx.exception.code, "wait_barrier")
-
-    def test_resume_requires_paused_goal(self):
-        state = new_state()
-        with self.assertRaises(GoalError) as ctx:
-            GoalService(FakeAdapter(state=state)).handle({
-                "action": "resume", "expected_revision": state_revision(state), "reason": "go",
-            })
-        self.assertEqual(ctx.exception.code, "goal_not_paused")
 
     def test_complete_requests_verification_without_marking_done(self):
         state = new_state()
@@ -516,8 +324,7 @@ class ServiceTest(unittest.TestCase):
         adapter = FakeAdapter(state=state)
         with self.assertRaises(GoalError) as ctx:
             GoalService(adapter).handle({
-                "action": "update", "expected_revision": state_revision(state),
-                "contract": contract(), "approved": True,
+                "action": "create", "contract": contract(), "approved": True,
             })
         self.assertEqual(ctx.exception.code, "arg_unknown")
         self.assertEqual(adapter.writes, 0)

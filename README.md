@@ -3,12 +3,13 @@
 **English** · [Русский](README.ru.md)
 
 The `goal_control` tool: an LLM manages the Goal of the **current chat** without a
-manual `/goal` — create, read, update, pause, resume, and request verified
-completion. TODO is optional.
+manual `/goal` — create once, read status, and submit completion evidence.
+TODO is optional. Lifecycle changes belong to native user controls.
 
 **Status: local, unreleased hardening candidate. Not installed or deployed by this change.**
-Native CAS across UI/judge/plugin writers remains an external dependency; this is
-not qualified for automatic activation. Publication and installation require separate approval.
+Plugin-only create-once replaces the earlier full-lifecycle/CAS plan; no core changes
+are required. Initial creation still has a concurrency risk. Publication and installation
+require separate approval; behavioural benefit and live continuation are not yet qualified.
 
 ## Historical verification (not acceptance of this candidate)
 
@@ -53,9 +54,6 @@ stay native: the plugin starts no second loop and never writes to SQLite directl
 |---|---|---|
 | `status` | — | read the Goal, its contract and `revision`; writes nothing |
 | `create` | `contract`, `expected_todo_revision?` | create a Goal, independent of any TODO |
-| `update` | `contract`, `expected_revision` | identical contract only (read-only no-op); changes require native user control |
-| `pause` | `expected_revision`, `reason` | stop auto-continuation (does not interrupt the current call) |
-| `resume` | `expected_revision`, `reason` | resume only a nonempty `agent:` pause with remaining budget and no wait barrier |
 | `complete` | `expected_revision`, `evidence` | request verification; returns `verification_status: pending` |
 
 Full semantics and error codes:
@@ -63,10 +61,11 @@ Full semantics and error codes:
 
 ## Deliberate boundaries
 
-- `create` never replaces a live Goal: a different contract while `active`/`paused` →
-  `goal_exists`. The identical contract while `active` is an idempotent no-op
-  (`changed: false`); a `done` goal may be replaced by a new one.
-- `resume` does not bypass `budget`/gate/auth stops and does not lift a wait barrier.
+- `create` requires no native record: active, paused, done and cleared records all
+  block replacement (`goal_exists`). An identical active create is only a read-only
+  no-op (`changed:false`). Corrupt/unreadable records are not treated as absence.
+- Legacy `update`, `pause` and `resume` return `action_disabled`, without host reads
+  or writes. Their adapter mutation paths have been removed.
 - `complete` never writes `done`: the native judge decides at the turn boundary,
   after the gates pass. Evidence must be repeated in the reply — the judge reads the
   reply, not the tool result.
@@ -80,11 +79,8 @@ Full semantics and error codes:
 
 ### Authority, audit and unresolved atomicity
 
-- Non-identical `update` returns `contract_change_requires_user`. There is no trusted
-  in-tool approval channel; `reason`/`approved` text cannot grant authority. Do not
-  clear/recreate a live goal to bypass this restriction.
-- User, unknown, gate and budget pauses cannot be resumed by the model. An `agent:`
-  reason identifies the pause owner, not proof that a user has answered.
+- Contract changes, pauses and resumption require native user control. Neither
+  `reason` nor `approved` grants authority. Never clear/recreate as a workaround.
 - TODO binding reads the latest exactly paired persisted result from the trusted
   transcript ID. It is **not** the live TodoStore; Goal route and transcript IDs differ.
 - Audit format v1 lives at `plugin-data/hermes-todo-goal/goals/<sha256[:32]>.json`.
@@ -102,17 +98,18 @@ Full semantics and error codes:
   state/revision and `audit_status:failed`. Unreadable native effects return `unknown`,
   nullable state/revision/changed. Read status and report uncertainty; **do not retry**.
 - Revision hashes/readback do **not** prevent concurrent UI/judge writes or ABA.
-  Full automatic activation remains blocked on a shared native CAS implementation.
+  The remaining native mutation is initial creation. Its last preflight is not CAS;
+  a simultaneous native UI creation may still be overwritten. Do not manage a Goal
+  concurrently. This is a scoped create-once design, not general race safety.
 
-### Automatic routing remains off
+### Opt-in create-once routing
 
-`plugins.entries.hermes-todo-goal.settings.auto_create` defaults to false and
-requires a literal boolean true plus a qualified shared native CAS capability.
-This candidate intentionally reports that capability unavailable, so even an opt-in
-cannot inject the section on the current host. Positive registration tests stub the
-capability; they do not qualify prompt delivery or model behaviour.
+`plugins.entries.hermes-todo-goal.settings.auto_create` defaults to false. Literal
+boolean true registers guidance on a compatible host, without a CAS capability stub
+or core changes. This does not enable a second loop or grant lifecycle permissions.
 Routing means directly requested, verifiable work likely to need multiple turns,
-not merely multiple tool calls. Existing goals are not automatically rewritten.
+not merely multiple tool calls. The old shared-CAS activation blocker is superseded
+by this reduced contract and its explicit residual risk.
 
 ## Installation (published release, not approval to deploy this candidate)
 
@@ -162,6 +159,14 @@ toolset (plugin toolsets are enabled automatically; nothing to tick in
 - If the gateway did not answer (`restart_required`): quit and reopen Hermes
   Desktop, or run `hermes gateway restart`.
 
+## Initial-create locking
+
+Plugin creates for the same profile/session use an atomic directory lock next to
+that session's audit file (`.create.lock`). A concurrent call or unavailable lock
+returns `create_locked` before native mutation. An abandoned lock is not removed
+automatically: operator inspection is required. This coordinates plugin writers,
+not native UI/judge writers, and does not claim shared CAS or eliminate that race.
+
 ## Verification
 
 From the repository root:
@@ -170,6 +175,7 @@ From the repository root:
 # 1. Hermes-independent core: contract, policy, schema, registration (stdlib only)
 python3 -B -m unittest discover -s tests -p 'test_contract.py' -v
 python3 -B -m unittest discover -s tests -p 'test_service.py' -v
+python3 -B -m unittest discover -s tests -p 'test_create_once.py' -v
 python3 -B -m unittest discover -s tests -p 'test_plugin.py' -v
 python3 -B -m unittest discover -s tests -p 'test_todo_pairing.py' -v
 python3 -B -m unittest discover -s tests -p 'test_audit.py' -v
@@ -181,6 +187,13 @@ HERMES_DISABLE_LAZY_INSTALLS=1 HERMES_HOME=$(mktemp -d) \
   PYTHONPATH="$HERMES_AGENT_DIR" \
   "$HERMES_AGENT_DIR/venv/bin/python" -B -m unittest discover -s tests \
   -p 'test_desktop.py' -v
+
+# Optional native prompt delivery: real AIAgent + SDK serialization, intercepted
+# before HTTP; section off/on, no inference and no model-behavior claim.
+HERMES_DISABLE_LAZY_INSTALLS=1 HERMES_HOME=$(mktemp -d) \
+  PYTHONPATH="$HERMES_AGENT_DIR" \
+  "$HERMES_AGENT_DIR/venv/bin/python" -B -m unittest discover -s tests \
+  -p 'test_prompt_delivery.py' -v
 
 # 3. Packaging checks (without installing)
 hermes plugins validate . --json
@@ -199,8 +212,8 @@ actual registration is covered by `plugins doctor` and manifest shape by
 - Continuation actually re-queueing a next turn in a live session (only the decision
   path was run).
 - Other surfaces (Telegram, ACP, Kanban workers) — not exercised.
-- The race "user pauses exactly during an update" on a real UI: a unit test covers
-  generation checking, not cross-process locking.
+- Initial create racing against native UI writes: no shared CAS is claimed.
+- Model-level A/B benefit of the revised create-once policy.
 
 ## Layout
 

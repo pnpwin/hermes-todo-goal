@@ -12,18 +12,16 @@ from .contract import CONTRACT_FIELDS, MAX_CONTRACT_FIELD_CHARS
 from .service import ACTIONS
 
 _TOOL_DESCRIPTION = (
-    "Manage the Goal of the CURRENT chat session: status, create, update, pause, resume, "
-    "complete. A Goal is the completion contract Hermes itself keeps judging after each "
-    "turn; it is independent of any todo list. Use 'create' for directly requested, "
-    "verifiable work likely to need continuation across turns. Multiple tool calls "
-    "alone do not justify it: exclude short tasks, questions, exploration and plan-only "
-    "requests. Read status first; do not replace an existing goal for a new request. "
-    "'update' only accepts an identical "
-    "contract as a no-op; changes require native user control. 'pause'/'resume' manage "
-    "continuation, and 'complete' to submit evidence for verification. 'complete' does not "
-    "mark the goal done - Hermes' own judge and quality gates decide that at the turn "
-    "boundary, so put the evidence in your final reply as well. Todos are optional: pass "
-    "expected_todo_revision to bind an existing plan for audit only."
+    "Create-once Goal control for the CURRENT chat: status, create, complete. "
+    "Use create for directly requested, verifiable work likely to need continuation across turns; "
+    "not short tasks, questions, exploration or plan-only requests. Multiple tool calls alone "
+    "do not justify a Goal. Read status first: create only when state is null. "
+    "Never replace active, paused, done or cleared goals. Update, pause and resume are disabled; "
+    "use native user control, never clear/recreate as a workaround. Complete only records "
+    "evidence for verification; it never changes native state or marks done. Repeat evidence "
+    "in your reply: the native judge and gates decide at the turn boundary. Optional "
+    "expected_todo_revision binds a persisted plan for audit only. Initial creation is not "
+    "atomic against simultaneous native UI writes; do not manage the Goal concurrently."
 )
 
 FIELD_HINTS = {
@@ -44,7 +42,7 @@ GOAL_SCHEMA: dict = {
             "contract": {
                 "type": "object",
                 "description": (
-                    "Required for create and update: the completion contract. All five fields "
+                    "Required for create: the completion contract. All five fields "
                     "are required and must be non-blank text describing the result, not a "
                     "checklist of steps."
                 ),
@@ -62,8 +60,8 @@ GOAL_SCHEMA: dict = {
             "expected_revision": {
                 "type": "string",
                 "description": (
-                    "Opaque revision returned by action=status. Required for update, pause, "
-                    "resume and complete for stale-snapshot preflight rejection. This is not "
+                    "Opaque revision returned by action=status. Required for complete "
+                    "for stale-snapshot preflight rejection. This is not "
                     "an atomic compare-and-set or an ABA-safe version."
                 ),
             },
@@ -75,11 +73,6 @@ GOAL_SCHEMA: dict = {
                     "Binds the plan to the goal for audit; it does not make the goal depend "
                     "on todos and never counts as proof of completion."
                 ),
-            },
-            "reason": {
-                "type": "string",
-                "maxLength": 500,
-                "description": "Why the goal is being paused or resumed. Required for both.",
             },
             "evidence": {
                 "type": "string",

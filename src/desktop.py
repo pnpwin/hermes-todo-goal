@@ -32,7 +32,8 @@ TODO_TRANSCRIPT_LIMIT = 400
 #: turns a host upgrade into one explicit refusal instead of an AttributeError.
 REQUIRED_SYMBOLS = (
     ("hermes_cli.goals", "load_goal"),
-    ("hermes_cli.goals", "save_goal"),
+    ("hermes_cli.goals", "_meta_key"),
+    ("hermes_cli.goals", "_get_session_db"),
     ("hermes_cli.goals", "GoalManager"),
     ("hermes_cli.goals", "GoalContract"),
     ("gateway.session_context", "bound_session_key"),
@@ -175,8 +176,21 @@ class HermesGoalAdapter:
 
     # ---- reads --------------------------------------------------------
     def load(self) -> dict[str, Any] | None:
-        state = self.goals.load_goal(self.session_key())
-        return asdict(state) if state is not None else None
+        key = self.session_key()
+        # Native load_goal conflates missing, corrupt and failed reads. Never
+        # authorize a create from that ambiguity. Use the registry-owned store.
+        try:
+            raw = self._store().get_meta(self.goals._meta_key(key))
+        except GoalError:
+            raise
+        except Exception:
+            raise GoalError("state_unreadable", "Goal record could not be read; no write allowed.") from None
+        if raw is None:
+            return None
+        state = self.goals.load_goal(key)
+        if state is None:
+            raise GoalError("state_unreadable", "An existing goal record is unreadable; no write allowed.")
+        return asdict(state)
 
     def todo_snapshot(self) -> dict[str, Any] | None:
         """Newest paired ``todo_list`` result from this session's own transcript."""
@@ -200,47 +214,23 @@ class HermesGoalAdapter:
 
     # ---- writes -------------------------------------------------------
     def create(self, outcome: str, contract: dict[str, str]) -> dict[str, Any]:
-        manager = self._native()
-        state = manager.set(outcome, contract=self.goals.GoalContract(**contract))
-        return asdict(state)
+        # Atomic mkdir coordinates plugin instances/processes only. Native UI and
+        # judge writers do not use it; this is not a shared native CAS.
+        try:
+            lock = self._audit_path(create=True).with_suffix(".create.lock")
+            lock.mkdir()
+        except OSError:
+            raise GoalError("create_locked", "Goal creation is locked or unavailable; no native write made.") from None
+        try:
+            manager = self._native()
+            if manager.state is not None or self.load() is not None:
+                raise GoalError("goal_exists", "Create-once cannot replace any existing goal record.")
+            state = manager.set(outcome, contract=self.goals.GoalContract(**contract))
+            return asdict(state)
+        finally:
+            # Do not auto-remove a pre-existing/stale lock: fail closed instead.
+            lock.rmdir()
 
-    def replace_contract(self, snapshot: dict[str, Any], outcome: str,
-                         contract: dict[str, str]) -> dict[str, Any]:
-        """Rewrite headline + contract while keeping every operational field.
-
-        ``GoalManager.set()`` would zero ``turns_used`` and rebuild the state, so
-        it is never used here. The generation is re-checked immediately before the
-        write because a user (or the turn boundary) may have moved the goal while
-        the model was deciding.
-        """
-        self._native()
-        state = self.goals.load_goal(self.session_key())
-        if state is None:
-            raise GoalError("no_goal", "the goal disappeared before the update could be written")
-        if (float(getattr(state, "created_at", 0.0) or 0.0) != float(snapshot.get("created_at") or 0.0)
-                or str(getattr(state, "turns_used", 0)) != str(snapshot.get("turns_used"))):
-            raise GoalError("revision_stale",
-                            "the goal changed while the update was being prepared; re-read it")
-        state.goal = outcome
-        state.contract = self.goals.GoalContract(**contract)
-        state.last_verdict = None
-        state.last_reason = None
-        self.goals.save_goal(self.session_key(), state)
-        return asdict(state)
-
-    def pause(self, reason: str) -> dict[str, Any]:
-        manager = self._native()
-        state = manager.pause(reason)
-        if state is None:
-            raise GoalError("no_goal", "there is no goal to pause")
-        return asdict(state)
-
-    def resume(self) -> dict[str, Any]:
-        manager = self._native()
-        state = manager.resume(reset_budget=False)
-        if state is None:
-            raise GoalError("no_goal", "there is no goal to resume")
-        return asdict(state)
 
     # ---- audit --------------------------------------------------------
     def _audit_path(self, *, create=False) -> Path:

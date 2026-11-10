@@ -58,6 +58,97 @@ class NativeAdapterTest(unittest.TestCase):
 
         goals.clear_goal(self.key)
 
+    def test_adapter_create_refuses_existing_record(self):
+        from hermes_cli import goals
+        goals.GoalManager(self.key).set("native user goal", contract=goals.GoalContract(**CONTRACT))
+        before = self.adapter.load()
+        with self.assertRaises(GoalError) as caught:
+            self.adapter.create(CONTRACT["outcome"], dict(CONTRACT))
+        self.assertEqual(caught.exception.code, "goal_exists")
+        self.assertEqual(self.adapter.load(), before)
+
+    def test_corrupt_native_record_is_not_absence(self):
+        key = self.adapter.goals._meta_key(self.key)
+        db = self.adapter._store()
+        db.set_meta(key, "invalid-json")
+        handler = plugin.build_handler(lambda: self.adapter)
+        result = json.loads(handler({"action": "create", "contract": dict(CONTRACT)}))
+        self.assertFalse(result["ok"], result)
+        self.assertEqual(result["error"]["code"], "state_unreadable")
+        self.assertEqual(db.get_meta(key), "invalid-json")
+
+    def test_parallel_plugin_creates_do_not_replace_each_other(self):
+        from concurrent.futures import ThreadPoolExecutor
+        from threading import Event
+        from unittest.mock import patch
+        from hermes_cli import goals
+        entered, release = Event(), Event()
+        original = goals.GoalManager.set
+        def held_set(manager, outcome, **kwargs):
+            if outcome == "first":
+                entered.set()
+                if not release.wait(10):
+                    raise AssertionError("test release timed out")
+            return original(manager, outcome, **kwargs)
+        second = HermesGoalAdapter(session_key_getter=lambda: self.key,
+                                   transcript_id_getter=lambda: self.transcript)
+        def attempt(adapter, outcome):
+            try:
+                return adapter.create(outcome, dict(CONTRACT, outcome=outcome))
+            except GoalError as exc:
+                return exc.code
+        with patch.object(goals.GoalManager, "set", held_set), ThreadPoolExecutor(2) as pool:
+            first = pool.submit(attempt, self.adapter, "first")
+            try:
+                self.assertTrue(entered.wait(5))
+                rejected = pool.submit(attempt, second, "second").result(timeout=5)
+            finally:
+                release.set()
+            winner = first.result(timeout=5)
+        self.assertEqual(rejected, "create_locked")
+        assert isinstance(winner, dict)
+        self.assertEqual(winner["goal"], "first")
+        state = self.adapter.load()
+        assert state is not None
+        self.assertEqual(state["goal"], "first")
+        self.assertFalse(self.adapter._audit_path().with_suffix(".create.lock").exists())
+
+    def test_create_lock_released_after_native_exception(self):
+        from unittest.mock import patch
+        from hermes_cli import goals
+        with patch.object(goals.GoalManager, "set", side_effect=RuntimeError("synthetic")):
+            with self.assertRaises(RuntimeError):
+                self.adapter.create(CONTRACT["outcome"], dict(CONTRACT))
+        self.assertFalse(self.adapter._audit_path().with_suffix(".create.lock").exists())
+        self.assertIsNone(self.adapter.load())
+        self.assertEqual(self.adapter.create(CONTRACT["outcome"], dict(CONTRACT))["goal"], CONTRACT["outcome"])
+
+    def test_unavailable_or_preexisting_create_lock_refuses_before_native_write(self):
+        from pathlib import Path
+        from unittest.mock import patch
+        from hermes_cli import goals
+        base = Path(_TMP_HOME) / (self.key + "-locked")
+        adapter = HermesGoalAdapter(session_key_getter=lambda: self.key,
+                                    data_dir_getter=lambda: base)
+        lock = adapter._audit_path(create=True).with_suffix(".create.lock")
+        lock.mkdir()
+        with patch.object(goals.GoalManager, "set", side_effect=AssertionError("native write")):
+            with self.assertRaises(GoalError) as caught:
+                adapter.create(CONTRACT["outcome"], dict(CONTRACT))
+            self.assertEqual(caught.exception.code, "create_locked")
+        self.assertTrue(lock.is_dir())
+        self.assertIsNone(adapter.load())
+        lock.rmdir()
+        blocked = base / "not-a-directory"
+        blocked.write_text("keep")
+        other = HermesGoalAdapter(session_key_getter=lambda: self.key,
+                                  data_dir_getter=lambda: blocked)
+        with self.assertRaises(GoalError) as caught:
+            GoalService(other).handle({"action": "create", "contract": dict(CONTRACT)})
+        self.assertEqual(caught.exception.code, "create_locked")
+        self.assertIsNone(other.load())
+        self.assertEqual(blocked.read_text(), "keep")
+
     def test_host_symbols_present(self):
         self.assertEqual(missing_symbols(), [])
 
@@ -94,7 +185,7 @@ class NativeAdapterTest(unittest.TestCase):
                 "expected_revision": before["revision"],
                 "contract": {**CONTRACT, "verification": "Run artifact tests twice"},
             })
-        self.assertEqual(caught.exception.code, "contract_change_requires_user")
+        self.assertEqual(caught.exception.code, "action_disabled")
         after = self.service.handle({"action": "status"})["state"]
         self.assertEqual(after, before["state"])
         self.assertEqual(after["contract"]["verification"], CONTRACT["verification"])
@@ -102,26 +193,19 @@ class NativeAdapterTest(unittest.TestCase):
         self.assertEqual(after["subgoals"], ["keep the docs"])
         self.assertEqual(len(after["gates"]), 1)
 
-    def test_pause_and_resume_preserve_turns(self):
+    def test_disabled_lifecycle_preserves_native_state(self):
         from hermes_cli import goals
-
         self.service.handle({"action": "create", "contract": dict(CONTRACT)})
-        state = goals.load_goal(self.key)
-        state.turns_used = 4
-        goals.save_goal(self.key, state)
-
-        paused = self.service.handle({
-            "action": "pause", "expected_revision": state_revision(self.adapter.load()),
-            "reason": "waiting for a decision",
-        })
-        self.assertEqual(paused["state"]["status"], "paused")
-        self.assertTrue(paused["state"]["paused_reason"].startswith("agent:"))
-
-        resumed = self.service.handle({
-            "action": "resume", "expected_revision": paused["revision"], "reason": "user agreed",
-        })
-        self.assertEqual(resumed["state"]["status"], "active")
-        self.assertEqual(resumed["state"]["turns_used"], 4)
+        manager = goals.GoalManager(self.key)
+        manager.pause("user-paused")
+        before = self.adapter.load()
+        audit_before = self.adapter._audit_path().read_bytes()
+        handler = plugin.build_handler(lambda: self.adapter)
+        for action in ("pause", "resume", "update"):
+            result = json.loads(handler({"action": action, "reason": "user agreed"}))
+            self.assertEqual(result["error"]["code"], "action_disabled")
+            self.assertEqual(self.adapter.load(), before)
+            self.assertEqual(self.adapter._audit_path().read_bytes(), audit_before)
 
     def test_no_session_binding_is_refused(self):
         adapter = HermesGoalAdapter(session_key_getter=lambda: "")
@@ -173,11 +257,8 @@ class NativeAdapterTest(unittest.TestCase):
         self.assertEqual(boundary.state.contract.verification, CONTRACT["verification"])
         self.assertEqual(boundary.state.max_turns, 20)
 
-        paused = self.service.handle({
-            "action": "pause", "expected_revision": state_revision(self.adapter.load()),
-            "reason": "waiting for input",
-        })
-        self.assertEqual(paused["state"]["status"], "paused")
+        goals.GoalManager(self.key).pause("user-paused")
+        self.assertEqual(self.adapter.load()["status"], "paused")
         self.assertFalse(goals.GoalManager(session_id=self.key).is_active())
 
     def test_json_tool_boundary_over_the_real_adapter(self):
@@ -195,7 +276,7 @@ class NativeAdapterTest(unittest.TestCase):
         bad = json.loads(handler({"action": "update", "expected_revision": "stale",
                                   "contract": dict(CONTRACT)}))
         self.assertFalse(bad["ok"])
-        self.assertEqual(bad["error"]["code"], "revision_stale")
+        self.assertEqual(bad["error"]["code"], "action_disabled")
 
     def test_audit_file_records_mutation(self):
         self.service.handle({"action": "create", "contract": dict(CONTRACT)})
@@ -321,25 +402,36 @@ class NativeAdapterTest(unittest.TestCase):
         self.assertFalse(root.exists())
         self.assertEqual(status["audit_status"], "missing")
 
-    def test_new_goal_replaces_audit_generation_and_binding(self):
+    def test_cleared_goal_cannot_replace_audit_generation_or_binding(self):
         from hermes_cli import goals
         self._append_todo_turn(json.dumps({"revision": 4, "todos": [
             {"id": "a", "content": "task", "status": "pending"}]}))
-        first = self.service.handle({"action": "create", "contract": dict(CONTRACT),
-                                     "expected_todo_revision": 4})
+        self.service.handle({"action": "create", "contract": dict(CONTRACT),
+                             "expected_todo_revision": 4})
+        before = self.adapter._audit_path().read_bytes()
         goals.clear_goal(self.key)
-        second = self.service.handle({"action": "create", "contract": dict(CONTRACT)})
-        data = json.loads(self.adapter._audit_path().read_text())
-        self.assertNotEqual(first["state"]["created_at"], second["state"]["created_at"])
-        self.assertEqual(data["generation"], second["state"]["created_at"])
-        self.assertIsNone(self.service.handle({"action": "status"})["todo_binding"])
+        native_before = self.adapter.load()
+        with self.assertRaises(GoalError) as caught:
+            self.service.handle({"action": "create", "contract": dict(CONTRACT)})
+        self.assertEqual(caught.exception.code, "goal_exists")
+        self.assertEqual(self.adapter.load(), native_before)
+        self.assertEqual(self.adapter._audit_path().read_bytes(), before)
+        self.assertEqual(self.service.handle({"action": "status"})["todo_binding"],
+                         {"revision": 4, "ids": ["a"]})
 
     def test_audit_parent_failure_reports_partial_native_state(self):
         from pathlib import Path
         root = Path(_TMP_HOME) / (self.key + "-not-a-directory")
         root.write_text("keep")
+        calls = 0
+        def data_dir():
+            nonlocal calls
+            calls += 1
+            # Lock preflight succeeds; storage becomes unavailable for the audit
+            # after the native effect. Preserve that distinct partial outcome.
+            return root.parent / (self.key + "-lock-root") if calls == 1 else root
         adapter = HermesGoalAdapter(session_key_getter=lambda: self.key,
-                                    data_dir_getter=lambda: root)
+                                    data_dir_getter=data_dir)
         result = GoalService(adapter).handle({"action": "create", "contract": dict(CONTRACT)})
         self.assertFalse(result["ok"])
         self.assertEqual(result["outcome"], "partial")
@@ -408,8 +500,8 @@ goals.clear_goal("same-route")
         status = self.service.handle({"action": "status"})
         self.assertEqual(status["audit_status"], "missing")
         self.assertIsNone(status["todo_binding"])
-        result = self.service.handle({"action": "pause", "expected_revision": status["revision"],
-                                      "reason": "waiting"})
+        result = self.service.handle({"action": "complete", "expected_revision": status["revision"],
+                                      "evidence": "verified result"})
         self.assertEqual(result["outcome"], "partial")
         self.assertEqual(path.read_bytes(), before)
 

@@ -35,10 +35,13 @@ The user need not say 'goal'. Multiple tool calls alone do not justify a goal.
 Do not create a goal for questions, explanations, exploration, plan-only requests,
 or short tasks that can be completed and verified in the current turn.
 
-Before creating a goal, read status. Do not replace, rewrite or resume an existing
-goal just because a new request arrived. If it is unrelated or user-paused, ask the
-user through the native control; reason text is not authorization. Use only the
-current session. Never increase budget, bypass gates or choose another profile.
+Before creating a goal, read status: create only when state is null.
+Do not replace, rewrite or resume an existing goal, including done/cleared records.
+Update, pause and resume are disabled. For contract changes or pauses, ask the user
+to use native controls; never clear/recreate as a workaround. Use only the current
+session. Never increase budget, bypass gates or choose another profile.
+Initial creation is not atomic against native UI writers: do not manage the Goal
+concurrently. This guidance is not a concurrency guarantee.
 
 Describe outcome, verification, constraints, boundaries and stop_when from the
 user's request. A TODO is optional and is never evidence of completion. Carry out
@@ -46,16 +49,6 @@ the authorized work and run the verification. Request complete with concrete
 evidence and include it in the reply. Complete does not mark done: Hermes' native
 judge and gates decide. On a partial or unknown write outcome, read status and
 report the uncertainty; never automatically retry the mutation."""
-
-
-def _atomicity_available() -> bool:
-    """No shared host CAS seam is qualified yet; never infer it from config.
-
-    Replace only after the companion host implementation and all-writer native
-    acceptance (including UI/judge/ABA) are approved. Registration unit tests may
-    stub this probe; that does not enable the production capability.
-    """
-    return False
 
 
 def _refuse(code: str, message: str) -> str:
@@ -111,14 +104,14 @@ def register(ctx) -> None:
     )
     ctx.register_skill(SKILL_NAME, SKILL_PATH, description=SKILL_DESCRIPTION)
 
-    # A config opt-in is not a host atomicity capability.
+    # Opt-in enables create-once guidance, not native atomicity.
     get_config = getattr(ctx, "get_config", None)
     register_section = getattr(ctx, "register_system_prompt_section", None)
     if get_config is None or register_section is None:
         return
     if get_config("auto_create", False) is not True:
         return
-    if missing or not _atomicity_available():
+    if missing:
         return
     try:
         register_section(SECTION_ID, SECTION_TEXT, position="after_memory",

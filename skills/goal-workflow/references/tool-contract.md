@@ -6,10 +6,7 @@ profile, home, database and approval are decided by the host, never by the model
 | action | arguments | effect |
 |---|---|---|
 | `status` | — | Read the current goal, its contract and its `revision`. Never writes. |
-| `create` | `contract`, optional `expected_todo_revision` | Create the goal for this session. Refused when a live goal exists. |
-| `update` | `contract`, `expected_revision` | Identical contract only: read-only no-op. Otherwise `contract_change_requires_user`. |
-| `pause` | `expected_revision`, `reason` | Stop automatic continuation. Does not interrupt the running call or any process. |
-| `resume` | `expected_revision`, `reason` | Resume a nonempty `agent:` pause only, with remaining budget and no wait. Never resets `turns_used`. |
+| `create` | `contract`, optional `expected_todo_revision` | Create the goal for this session. Requires no native record, including done/cleared. |
 | `complete` | `expected_revision`, `evidence` | Ask for verification. Returns `verification_status: pending`; never sets `done`. |
 
 ## Contract fields
@@ -21,29 +18,36 @@ register a Hermes quality gate. Gates stay a user action (`/goal gate add`).
 
 ## What `create` refuses
 
-- a different `active` or `paused` goal exists (`goal_exists`) — ask the user;
+- any existing goal record exists (`goal_exists`) — ask the user;
   do not clear/recreate or replace its contract as a workaround;
 - the same goal is already active with the same contract → `changed: false`, no write;
-- a `done` or `cleared` goal does not block a new one: that work is over.
+- a `done` or `cleared` record blocks a new creation too; clearing is not a bypass.
+- old `update`/`pause`/`resume` calls return `action_disabled` without host access.
+
+## Routing
+
+`settings.auto_create` defaults to false. Literal true on a compatible host registers
+create-once guidance. No CAS capability is claimed or required. Initial creation
+can race with native UI writers; use isolated sessions without concurrent Goal edits
+for qualification. Prompt rendering is not model compliance or E2E continuation.
 
 ## Error codes
 
 | code | meaning | what to do |
 |---|---|---|
+| `action_disabled` | update/pause/resume are unavailable in create-once | use native user control; no bypass |
+| `state_unreadable` | existing Goal cannot be read safely | stop; do not treat it as absence |
 | `no_session` | no session is bound to this call | run from a live chat turn; do not retry blindly |
 | `no_goal` | the session has no goal | `create` first |
-| `goal_exists` | a live goal would be replaced | ask the user; do not bypass it |
-| `contract_change_requires_user` | no trusted in-tool approval channel | native user control; `reason` is not authorization |
+| `goal_exists` | an existing goal record would be replaced | ask the user; do not bypass it |
 | `audit_unverified` | audit failed after a possible native effect | report partial/unknown, read status; no automatic retry |
-| `goal_not_live` / `goal_not_active` / `goal_not_paused` | action does not fit the status | `status`, then choose |
-| `revision_required` | mutation without `expected_revision` | `status` first |
+| `goal_not_active` | action does not fit the status | `status`, then choose |
+| `revision_required` | complete without `expected_revision` | `status` first |
 | `revision_stale` | the goal moved since it was read | `status` again, re-apply |
 | `persistence_unverified` | the host did not persist a field | report the unknown outcome; do not claim success |
 | `store_unavailable` | the session store is unavailable | stop; no change was made |
 | `todo_unavailable` | the plan could not be read | create the goal without the binding |
 | `todo_revision_stale` / `todo_plan_empty` / `todo_plan_inactive` | the todo binding is not usable | re-read `todo_list`; binding is optional |
-| `wait_barrier` | the goal is parked on a process, child or deadline | ask the user; do not resume |
-| `pause_not_resumable` | user/unknown/gate/budget pause, empty agent reason, or no budget | native user control; never bypass |
 | `host_incompatible` | this Hermes build lacks a required symbol | report the listed symbols; do not work around |
 | `arg_unknown` / `arg_missing` / `arg_too_long` | the call shape is wrong | fix the arguments |
 
