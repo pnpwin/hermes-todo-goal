@@ -299,6 +299,105 @@ class NativeAdapterTest(unittest.TestCase):
                     {"role": "tool", "tool_call_id": "x"}]
                 self.assertEqual(_paired_with_todo_call(rows, 1), expected)
 
+    def test_bound_goal_status_survives_adapter_reconstruction(self):
+        self._append_todo_turn(json.dumps({"revision": 4, "todos": [
+            {"id": "a", "content": "task", "status": "pending"}]}))
+        self.service.handle({"action": "create", "contract": dict(CONTRACT),
+                             "expected_todo_revision": 4})
+        restored = GoalService(HermesGoalAdapter(session_key_getter=lambda: self.key))
+        result = restored.handle({"action": "status"})
+        self.assertEqual(result["todo_binding"], {"revision": 4, "ids": ["a"]})
+        self.assertEqual(result["audit_status"], "confirmed")
+
+    def test_status_does_not_create_audit_directories(self):
+        from pathlib import Path
+        from hermes_cli import goals
+        goals.GoalManager(self.key).set(CONTRACT["outcome"], contract=goals.GoalContract(**CONTRACT))
+        root = Path(_TMP_HOME) / (self.key + "-read-only")
+        adapter = HermesGoalAdapter(session_key_getter=lambda: self.key,
+                                    data_dir_getter=lambda: root)
+        status = GoalService(adapter).handle({"action": "status"})
+        self.assertTrue(status["ok"])
+        self.assertFalse(root.exists())
+        self.assertEqual(status["audit_status"], "missing")
+
+    def test_new_goal_replaces_audit_generation_and_binding(self):
+        from hermes_cli import goals
+        self._append_todo_turn(json.dumps({"revision": 4, "todos": [
+            {"id": "a", "content": "task", "status": "pending"}]}))
+        first = self.service.handle({"action": "create", "contract": dict(CONTRACT),
+                                     "expected_todo_revision": 4})
+        goals.clear_goal(self.key)
+        second = self.service.handle({"action": "create", "contract": dict(CONTRACT)})
+        data = json.loads(self.adapter._audit_path().read_text())
+        self.assertNotEqual(first["state"]["created_at"], second["state"]["created_at"])
+        self.assertEqual(data["generation"], second["state"]["created_at"])
+        self.assertIsNone(self.service.handle({"action": "status"})["todo_binding"])
+
+    def test_audit_parent_failure_reports_partial_native_state(self):
+        from pathlib import Path
+        root = Path(_TMP_HOME) / (self.key + "-not-a-directory")
+        root.write_text("keep")
+        adapter = HermesGoalAdapter(session_key_getter=lambda: self.key,
+                                    data_dir_getter=lambda: root)
+        result = GoalService(adapter).handle({"action": "create", "contract": dict(CONTRACT)})
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["outcome"], "partial")
+        self.assertEqual(result["state"]["status"], "active")
+        self.assertEqual(root.read_text(), "keep")
+
+    def test_corrupt_audit_status_is_read_only(self):
+        self.service.handle({"action": "create", "contract": dict(CONTRACT)})
+        path = self.adapter._audit_path()
+        path.write_text("broken-json")
+        status = self.service.handle({"action": "status"})
+        self.assertTrue(status["ok"])
+        self.assertEqual(status["audit_status"], "failed")
+        self.assertIsNone(status["todo_binding"])
+        self.assertIn("audit_warning", status)
+        self.assertEqual(path.read_text(), "broken-json")
+
+    def test_default_audit_read_does_not_call_creating_host_helper(self):
+        from pathlib import Path
+        from unittest.mock import patch
+        root = Path(_TMP_HOME) / (self.key + "-default-read")
+        with patch("hermes_constants.get_hermes_home", return_value=root), patch(
+            "plugins.plugin_storage.plugin_data_dir", side_effect=AssertionError("write on read")):
+            self.assertEqual(self.adapter.audit_binding(1.0), (None, "missing"))
+        self.assertFalse(root.exists())
+
+    def test_two_profile_processes_isolate_same_route_key(self):
+        import subprocess
+        import sys
+        from pathlib import Path
+        code = '''import json, os
+from src.desktop import HermesGoalAdapter
+from src.service import GoalService
+from hermes_cli import goals
+adapter = HermesGoalAdapter(session_key_getter=lambda: "same-route")
+contract = {key: key for key in ("outcome", "verification", "constraints", "boundaries", "stop_when")}
+result = GoalService(adapter).handle({"action": "create", "contract": contract})
+print(json.dumps({"ok": result["ok"], "audit": str(adapter._audit_path()), "generation": result["state"]["created_at"]}))
+goals.clear_goal("same-route")
+'''
+        receipts = []
+        for name in ("profile-a", "profile-b"):
+            home = Path(_TMP_HOME) / self.key / name
+            home.mkdir(parents=True)
+            env = {**os.environ, "HOME": str(home), "HERMES_HOME": str(home / ".hermes"),
+                   "HERMES_DISABLE_LAZY_INSTALLS": "1", "UV_OFFLINE": "1"}
+            child = subprocess.run([sys.executable, "-B", "-c", code], env=env,
+                                   capture_output=True, text=True, timeout=30)
+            self.assertEqual(child.returncode, 0, child.stderr)
+            receipt = json.loads(child.stdout)
+            self.assertTrue(receipt["ok"], receipt)
+            self.assertTrue(Path(receipt["audit"]).is_relative_to(home))
+            receipts.append(receipt)
+        self.assertNotEqual(receipts[0]["audit"], receipts[1]["audit"])
+        for receipt in receipts:
+            self.assertEqual(json.loads(Path(receipt["audit"]).read_text())["generation"],
+                             receipt["generation"])
+
     # ---- helpers ------------------------------------------------------
     def _append_todo_turn(self, payload_json: str, session_id=None) -> None:
         db = self.adapter._store()

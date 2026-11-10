@@ -1,5 +1,18 @@
 # Changelog
 
+## Unreleased — local hardening, not deployed
+
+- Refuse user/unknown pauses, exhausted agent budgets and unapproved contract changes.
+- Separate trusted transcript IDs from Goal route keys; deny delegated child use.
+- Require exact TODO call-result provenance; preserve authoritative clears.
+- Report partial/unknown native/audit effects without automatic retries.
+- Persist completion evidence and generation-bound TODO binding in audit format v1;
+  read without mutation, serialize audit writers and retain corrupt journals.
+- Shared native CAS remains a release/automatic-activation blocker. Historical
+  verification below does not qualify the current candidate; no version bump.
+- Correct the old blanket CLI/`-z` claim: continuation depends on the actual
+  execution owner; direct judge invocation is not live next-turn acceptance.
+
 ## 0.1.1 — 2026-11-09
 
 Docs and packaging only; the tool contract, policy and host adapter are unchanged.

@@ -29,9 +29,13 @@ reply — slash commands are user actions, not tool calls.
   → do **not** create a goal; answer or use `todo_list` only.
 - A short task you can finish in this turn with evidence → do **not** create a goal;
   the extra continuation loop only adds budget risk.
-- The result criteria changed → `update` (in place, same budget).
+- The result criteria changed → ask the user to change the native goal contract.
+  `update` only accepts an identical contract as a read-only no-op; never clear/recreate
+  a live goal to bypass `contract_change_requires_user`.
 - New external information is needed and the user must decide → `pause`.
-- The user says continue / the answer arrived → `resume`.
+- The answer/event that an agent-owned pause awaited has arrived → read `status`,
+  then `resume` only if the pause is agent-owned, budget remains and no wait exists.
+  A user-owned pause must be resumed through native user control, not this tool.
 - You believe the result exists → `complete` with evidence.
 
 ## Procedure
@@ -48,7 +52,8 @@ reply — slash commands are user actions, not tool calls.
    If the user set no extra limits, say so in the field rather than inventing
    permission you do not have.
 3. If a plan exists, call `todo_list` and keep its `revision`. Then `create` with
-   `expected_todo_revision`. The plan is bound for audit only.
+   `expected_todo_revision`. The plan is bound for audit only, from the latest
+   exactly paired persisted transcript result, not a live TodoStore accessor.
 4. Read `revision` from the `create` result and keep it. Every later mutation needs
    the current revision; re-read with `status` when a call reports `revision_stale`.
 5. Work the plan, updating `todo_list` as you go. Todo updates never require a goal
@@ -63,7 +68,8 @@ reply — slash commands are user actions, not tool calls.
 - **Do not create a goal for planning-only or question-only requests.** The user
   asked for an answer, not a background loop.
 - **Do not use `create` to replace a live goal.** It refuses; that refusal is
-  correct. Use `update` for a contract change, or ask the user to clear it.
+  correct. Ask the user how to handle the existing goal; do not overwrite it or
+  clear/recreate it as a workaround for the contract-change refusal.
 - **`complete` is a request, not a verdict.** If the response says
   `verification_status: pending`, the goal is still active: say exactly that, report
   what you verified, and let the next turn-boundary check run.
@@ -75,6 +81,14 @@ reply — slash commands are user actions, not tool calls.
   the goal can change it; a child call is refused by design.
 - **`update` does not grant new budget.** If the goal hit `max_turns`, changing the
   contract will not extend it.
+
+- **Partial/unknown is not success.** On `audit_unverified` or
+  `persistence_unverified`, read status and report the actual state and uncertainty.
+  Never automatically repeat a mutation. Corrupt audit is not an absent Goal.
+- **Keep evidence task-scoped.** Completion evidence is persisted in the audit;
+  do not include credentials or unrelated transcript contents.
+- **Readback is not atomicity.** This local candidate has no qualified shared host
+  CAS. Automatic activation and claims of UI/judge race safety remain blocked.
 
 ## Verification
 

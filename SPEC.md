@@ -1,107 +1,83 @@
-# hermes-todo-goal — спецификация
+# hermes-todo-goal — спецификация локального hardening
 
-Статус: **реализовано и проверено локально; не установлено и не включено.**
-Авторизация этапа: реализация пакета и изолированные проверки. Установка, включение,
-перезапуски, публикация и оплаченные модельные испытания — не разрешены.
+Статус: локальный невыпущенный кандидат; изменения не установлены.
+Исходная версия 0.1.1, BASE c42dd1c5a8ee9d523d9eeefa7b0c0c0181c731d2.
+Реализация плагина и изолированные проверки разрешены; изменение установленного
+ядра, профилей, публикация и активация не входят в этот этап.
 
-## Цель
+## Архитектура
 
-LLM управляет Goal текущей сессии вызовом инструмента `goal_control`: создание,
-чтение, изменение, пауза, продолжение, запрос проверенного завершения. Продолжение,
-judge, quality gates и бюджет остаются штатными механизмами Hermes. TODO —
-необязательная привязка для аудита, не условие существования Goal.
+Один `goal_control`, toolset `goals`, поверх native GoalManager. Нет второго
+GoalStore, continuation loop, собственного judge или прямых SQLite-записей.
+TODO — изменяемый план; Goal — контракт результата. Галочки не являются evidence.
+Контракт: outcome, verification, constraints, boundaries, stop_when — пять
+непустых полей, максимум 4000 символов каждое, лишние поля запрещены.
 
-**TODO = изменяемый план действий; Goal = контракт результата.** Галочки не являются
-доказательством выполнения.
+## Полномочия и lifecycle
 
-## Поверхности
+- `status` читает native state и audit binding; не создаёт/исправляет audit-файлы.
+- `create` не заменяет active/paused Goal; идентичный active — no-op.
+  После done/cleared новая цель разрешена.
+- `update` принимает только идентичный контракт как read-only no-op. Любое изменение
+  даёт contract_change_requires_user: trusted in-tool approval API отсутствует.
+  Ни reason, ни approved=true не дают полномочий. Обход через clear/create запрещён.
+- `pause` добавляет agent: к причине, не переписывает пользовательскую паузу,
+  не прерывает текущий вызов/процесс.
+- `resume` разрешён только для непустой agent:-паузы, при остатке бюджета и без wait.
+  user-paused/unknown/gate/budget-паузы запрещены. Native reset_budget=False.
+  Префикс agent: не доказывает поступление ответа пользователя.
+- `complete` только для active, сохраняет evidence (до 4000 символов) и возвращает
+  pending. Не вызывает judge и не ставит done. Evidence повторяется в ответе;
+  native judge и gates остаются владельцами завершения.
+- Модель не задаёт session_id/profile/home/db_path/approved/force/reset_budget/gates.
+  Обязательная expected_revision для update/pause/resume/complete — fingerprint
+  полного native snapshot, НЕ атомарная ревизия и НЕ защита от ABA.
 
-Заявлена сессия Hermes Desktop (tui_gateway), где идентичность хода привязана через
-`gateway.session_context.bound_session_key()`. CLI/gateway-поверхности используют тот
-же контекст, но отдельно не квалифицированы. Kanban-воркеры, ACP и делегированные
-дети не поддерживаются: у них нет привязанного session key либо он принадлежит
-другой логической сессии, поэтому вызов получает `no_session`.
+## Идентичность и TODO
 
-## Инструмент
+Goal использует bound_session_key() без env fallback. Делегированный child
+отвергается даже при унаследованном родительском route key. Transcript session_id
+поступает отдельно из trusted registry dispatch; conversation_id не заменяет его.
+Без trusted transcript ID binding отказывает, standalone Goal остаётся доступен.
 
-Один tool `goal_control`, toolset `goals`, действия: `status`, `create`, `update`,
-`pause`, `resume`, `complete`. Схема — `src/schema.py`; она же единственное описание
-аргументов для модели, runtime отвергает лишние аргументы.
+По expected_todo_revision читается последний paired persisted result своей сессии,
+лимит 400 сообщений с ancestors. Это НЕ live TodoStore. Pairing: непустой точный
+call ID, ближайший assistant, остановка на user/system; host predicate проверяет
+legacy alias/deferred bridge. Непарные строки игнорируются. Последний парный clear
+или invalid payload не позволяет восстановить старый план. Пустой/неактивный план
+не привязывается; Goal без TODO разрешён.
 
-Никогда не принимаются от модели: `session_id`, `profile`, `home`, `db_path`,
-`approved`, `force`, `reset_budget`, `mark_done`, команды quality gates.
+## Аудит и неопределённость
 
-## Инварианты
+`plugin_data_dir` владеет write path:
+`plugin-data/hermes-todo-goal/goals/<sha256(route_key)[:32]>.json`.
+Host helper создаёт каталог; read path вычисляет тот же документированный путь
+через текущий get_hermes_home(), не вызывая создающий helper.
 
-1. `status` только читает; `revision` — sha256 канонического JSON всего состояния.
-2. `create` не заменяет живой Goal (`active`/`paused` → `goal_exists`); `done` и
-   `cleared` не блокируют новую цель. Повтор идентичного активного `create` —
-   `changed: false`, без записи.
-3. `update` меняет headline и контракт, сохраняя `turns_used`, `max_turns`,
-   `created_at`, `subgoals`, `gates`, статус и wait-поля. `GoalManager.set()` для
-   update не используется: он создаёт состояние заново и обнуляет бюджет.
-   `last_verdict` сбрасывается в `None`, чтобы новый контракт не выглядел проверенным.
-4. `pause` пишет причину с префиксом `agent:`, не переписывает пользовательскую
-   паузу, не прерывает текущий вызов и процессы.
-5. `resume` вызывает `resume(reset_budget=False)`. Отказывает при wait barrier и при
-   остановках, не связанных с агентом (бюджет, gates, auth): такие остановки требуют
-   решения пользователя.
-6. `complete` разрешён только для `active`; возвращает `verification_status: pending`,
-   не вызывает judge повторно и не пишет `done`. Завершение даёт штатная проверка на
-   границе хода, после gates.
-7. Каждая мутация перечитывается у хоста и сверяется по полям. Расхождение —
-   `persistence_unverified`, без слепого повтора: `save_goal` в Hermes может молча
-   не записать.
-8. Гонка с пользовательским изменением: перед записью `update` сверяет поколение
-   (`created_at`) и `turns_used`; при расхождении — `revision_stale`.
+Schema v1: native created_at generation, binding отдельно от последних 50 events.
+Legacy binding читается только из matching create; чтение не мигрирует файл.
+Новое поколение сбрасывает binding. Повреждённый/неподдерживаемый файл сохраняется
+и даёт failed. Evidence — task data без автоматического удаления секретов.
 
-## TODO-привязка
+Запись: per-file directory lock, unique same-directory temp, flush/fsync и replace.
+Конфликт lock — явный отказ; stale lock требует operator recovery. Нет общей
+транзакции native+audit и гарантии directory durability при потере питания.
 
-Включается только явным `expected_todo_revision`. Снимок читается из транскрипта
-собственной сессии (`SessionDB`), а не из аргументов модели и не из «последней»
-сессии. Принимается только результат `todo_list`, которому предшествует
-assistant-сообщение с вызовом todo-инструмента (защита от поддельной `role: tool`
-строки). Revision обязана совпасть; пустой или завершённый план запрещает привязку,
-но не запрещает Goal без привязки. Binding не влияет на контракт, не пересоздаёт Goal
-и не считается доказательством.
+Native success + audit failure → ok:false, partial, фактический state/revision.
+Неудачный readback → unknown, changed:null; state/revision null если прочитать
+невозможно. Никакого rollback или auto-retry. Status может вернуть ok:true для
+native state и audit_status:failed/warning/null binding. Аудит не GoalStore.
 
-## Аудит
+## Граница полной приёмки
 
-`plugin-data/hermes-todo-goal/goals/<sha256(session_key)[:32]>.json` — поколение,
-исходные todo ids/revision, before/after контракта и причина; последние 50 событий.
-Ключ сессии в файле хэширован. Это журнал, а не второй источник истины.
+Общий native CAS, включая UI/judge/clear/migration/continuation и ABA, не реализован
+плагином. Автоактивация заблокирована; локальный mutex аудита эту зависимость
+не закрывает. Companion change ядра требует отдельного разрешения.
 
-## Подтверждение изменения контракта
+Текущие offline suites: contract, service, plugin, todo_pairing, audit; native
+suite: test_desktop.py, реальный dispatch/GoalManager/SessionDB на synthetic homes.
+CI перечисляет только pure suites; локальный запуск не означает remote CI.
+Модельный E2E, delivery полного prompt, live requeue/consumed continuation и A/B
+требуют отдельных gate receipts; исторический CLI-прогон их не заменяет.
 
-Доверенного канала подтверждения из инструмента в этом билде нет:
-`PluginContext.ask_choice` привязан к диспетчеру слэш-команд, `clarify` требует
-agent-callback, которого registry-инструмент не получает. Поэтому MVP не спрашивает
-диалог, а полагается на: неизменность бюджета/gates/subgoals, обязательный `notice`
-в результате (скилл требует показать его пользователю) и аудит. Ослабление контракта
-технически не блокируется — это принятое ограничение, а не гарантия. Жёсткий гейт
-требует host-API и отдельного решения.
-
-## Совместимость
-
-`src/desktop.py::REQUIRED_SYMBOLS` перечисляет символы хоста:
-`hermes_cli.goals.{load_goal,save_goal,GoalManager,GoalContract}`,
-`gateway.session_context.bound_session_key`, `tools.todo_tool.is_todo_tool_call`,
-`plugins.plugin_storage.plugin_data_dir`. Если чего-то нет, инструмент
-регистрируется, но каждая операция возвращает `host_incompatible` со списком
-отсутствующих символов, а не падает с `AttributeError`. Это осознанно
-приватные импорты: `plugins validate` выдаёт по ним предупреждение (catalog rule 9).
-
-## Приёмка
-
-Выполнено:
-
-- 20 контрактных, 31 сервисный, 11 тестов схемы/границы/регистрации (`test_plugin.py`);
-- 13 нативных тестов на настоящих `GoalManager` и `SessionDB` с временным `HERMES_HOME`
-  (создание, readback, update с сохранением бюджета/gates/subgoals, pause/resume,
-  per-session изоляция, транскрипт TODO, аудит, граница хода, JSON-граница инструмента);
-- `plugins validate --json` → `ok: true` (предупреждение о приватных импортах);
-- `plugins doctor --ci` → OK, 1 tool зарегистрирован;
-- `skillcraft check` → структура и относительные ссылки в порядке.
-
-Не выполнено и не заявляется: модельный E2E, discovery/применение скилла, другие
-поверхности, межпроцессная гонка с UI.
+Полная API-справка: [tool-contract](skills/goal-workflow/references/tool-contract.md).

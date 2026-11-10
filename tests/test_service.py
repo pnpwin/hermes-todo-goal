@@ -70,7 +70,7 @@ class FakeAdapter:
         return copy.deepcopy(self.todos)
 
     # writes
-    def _store(self, state):
+    def _store(self, state: dict) -> dict:
         self.writes += 1
         for key in self.drop_on_write:
             state.pop(key, None)
@@ -101,9 +101,16 @@ class FakeAdapter:
         state["paused_reason"] = None
         return self._store(state)
 
-    def audit(self, event):
+    def audit(self, event) -> bool:
         self.audits.append(event)
         return True
+
+    def audit_binding(self, generation):
+        from src.audit import binding_for
+        if not self.audits:
+            return None, "missing"
+        data = {"generation": self.audits[-1]["after"]["created_at"], "events": self.audits}
+        return binding_for(data, generation), "confirmed"
 
 
 class ServiceTest(unittest.TestCase):
@@ -133,7 +140,7 @@ class ServiceTest(unittest.TestCase):
                     state = new_state(status="paused", paused_reason="agent:wait")
                 adapter = FakeAdapter(state=state)
                 adapter.audit = broken
-                args = {"action": action}
+                args: dict = {"action": action}
                 if action == "create":
                     args["contract"] = contract()
                 else:

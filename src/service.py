@@ -8,8 +8,8 @@ marks a goal done on the model's word.
 Design invariants (each is covered by a test in ``tests/test_service.py``):
 
 * :meth:`GoalService.handle_status` is read-only.
-* ``create`` never replaces a live goal; ``update`` preserves budget, gates,
-  subgoals and wait barriers; ``pause`` never relabels a user pause; ``resume``
+* ``create`` never replaces a live goal; ``update`` only permits an identical
+  contract no-op; ``pause`` never relabels a user pause; ``resume``
   never resets the turn budget; ``complete`` only *requests* verification.
 * Every mutation is re-read from the host and compared field by field, because a
   silently dropped write must not be reported as success.
@@ -87,6 +87,8 @@ class HostAdapter(Protocol):
     def todo_snapshot(self) -> dict[str, Any] | None: ...
 
     def audit(self, event: dict[str, Any]) -> bool: ...
+
+    def audit_binding(self, generation: float) -> tuple[dict[str, Any] | None, str]: ...
 
 
 def state_revision(snapshot: dict[str, Any] | None) -> str:
@@ -238,6 +240,16 @@ class GoalService:
             "todo_binding": None,
             "notice": notice,
         }
+        if state is not None:
+            try:
+                binding, audit_status = self._adapter.audit_binding(state.get("created_at"))
+            except Exception:
+                binding, audit_status = None, "failed"
+            result.update(todo_binding=binding, audit_status=audit_status)
+            if audit_status in {"failed", "generation_mismatch"}:
+                result["audit_warning"] = "Audit metadata unavailable; native state remains authoritative."
+        else:
+            result["audit_status"] = "missing"
         result.update(extra)
         return result
 

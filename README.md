@@ -6,10 +6,15 @@ The `goal_control` tool: an LLM manages the Goal of the **current chat** without
 manual `/goal` — create, read, update, pause, resume, and request verified
 completion. TODO is optional.
 
-**Status: installed in the default profile and exercised end to end through the CLI.
-Not yet exercised from the Desktop/TUI surface.**
+**Status: local, unreleased hardening candidate. Not installed or deployed by this change.**
+Native CAS across UI/judge/plugin writers remains an external dependency; this is
+not qualified for automatic activation. Publication and installation require separate approval.
 
-## What is verified
+## Historical verification (not acceptance of this candidate)
+
+The following observations concern plugin `9d278b2` (runtime unchanged in `c42dd1c`,
+0.1.1), not the current hardening diff. Current offline tests are described below;
+no new live-model task/continuation experiment has qualified this candidate.
 
 - Live model run (CLI `chat --cli`, gpt-6.1-sol): the agent discovered the bundled
   `goal-workflow` skill, called `goal_control` `status` → `create` → wrote the artifact →
@@ -26,10 +31,10 @@ separate approval. This directory on its own activates nothing.
 
 ### Surface note
 
-The goal-continuation hook (`_maybe_continue_goal_after_turn`) is wired only into the
-TUI runtime. A classic `hermes chat --cli` REPL or a `-z` one-shot therefore creates
-and reads the goal correctly but never judges or continues it by itself; that happens
-on the next TUI/Desktop turn.
+Continuation belongs to the execution owner, not the CLI process. A legacy
+in-process REPL and a gateway-backed CLI may follow different paths. A fresh `-z`
+process does not prove a fresh gateway or loaded plugin. Directly exercising
+`GoalManager.evaluate_after_turn()` does not prove automatic next-turn consumption.
 
 ## Why
 
@@ -48,9 +53,9 @@ stay native: the plugin starts no second loop and never writes to SQLite directl
 |---|---|---|
 | `status` | — | read the Goal, its contract and `revision`; writes nothing |
 | `create` | `contract`, `expected_todo_revision?` | create a Goal, independent of any TODO |
-| `update` | `contract`, `expected_revision` | replace the contract in place; budget, gates, subgoals and wait survive |
+| `update` | `contract`, `expected_revision` | identical contract only (read-only no-op); changes require native user control |
 | `pause` | `expected_revision`, `reason` | stop auto-continuation (does not interrupt the current call) |
-| `resume` | `expected_revision`, `reason` | continue with the remaining budget, without resetting `turns_used` |
+| `resume` | `expected_revision`, `reason` | resume only a nonempty `agent:` pause with remaining budget and no wait barrier |
 | `complete` | `expected_revision`, `evidence` | request verification; returns `verification_status: pending` |
 
 Full semantics and error codes:
@@ -73,27 +78,34 @@ Full semantics and error codes:
 - The model cannot pass `session_id`, `profile`, `home`, `db_path`, `approved`,
   `reset_budget` or gate commands — such arguments are rejected before any side effect.
 
-### Known limitation: confirming `update`
+### Authority, audit and unresolved atomicity
 
-In this Hermes build the tool has no trusted confirmation channel
-(`PluginContext.ask_choice` works only from a slash command, and `clarify` needs an
-agent callback that a registry tool does not receive). So `update` does not prompt;
-instead it:
+- Non-identical `update` returns `contract_change_requires_user`. There is no trusted
+  in-tool approval channel; `reason`/`approved` text cannot grant authority. Do not
+  clear/recreate a live goal to bypass this restriction.
+- User, unknown, gate and budget pauses cannot be resumed by the model. An `agent:`
+  reason identifies the pause owner, not proof that a user has answered.
+- TODO binding reads the latest exactly paired persisted result from the trusted
+  transcript ID. It is **not** the live TodoStore; Goal route and transcript IDs differ.
+- Audit format v1 lives at `plugin-data/hermes-todo-goal/goals/<sha256[:32]>.json`.
+  Binding belongs to native `created_at` and survives 50-event retention. Legacy
+  matching create events are read without migration-on-read. Corrupt journals are
+  preserved, not silently replaced. Completion evidence (up to 4000 characters)
+  is retained as task data, without automatic secret redaction; do not submit secrets.
+- Audit writes use a unique temporary file and an exclusive directory lock. Lock
+  conflict fails explicitly; stale locks require operator recovery, never automatic
+  deletion. File replacement is atomic, not a power-loss-safe native+audit transaction.
+- Native success plus audit failure returns `ok:false`, `outcome:partial`, actual
+  state/revision and `audit_status:failed`. Unreadable native effects return `unknown`,
+  nullable state/revision/changed. Read status and report uncertainty; **do not retry**.
+- Revision hashes/readback do **not** prevent concurrent UI/judge writes or ABA.
+  Full automatic activation remains blocked on a shared native CAS implementation.
 
-1. records before/after in the audit trail at
-   `plugin-data/hermes-todo-goal/goals/<sha256>.json` (session key is hashed, last
-   50 events kept);
-2. returns a `notice` the skill is required to show the user;
-3. never touches budget, gates, subgoals or wait state.
+## Installation (published release, not approval to deploy this candidate)
 
-This is a limitation precisely because weakening the contract is not technically
-blocked. A hard gate needs a host API for in-tool confirmation — a separate task,
-not something to work around.
-
-## Installation (not performed)
-
-Published at https://github.com/pnpwin/hermes-todo-goal (MIT; CI green on
-3.11/3.12; 62 Hermes-independent tests pass in a clean clone).
+Published releases: https://github.com/pnpwin/hermes-todo-goal (MIT).
+The commands below install that repository; they do not publish this local candidate.
+Historical CI is not evidence of CI execution on the current local changes.
 
 A bare path is not accepted by `hermes plugins install`: it is parsed as a GitHub
 `owner/repo` (`_resolve_git_url` yields `https://github.com/Users/somovis.git` plus
@@ -122,7 +134,7 @@ cp -R /path/to/hermes-todo-goal ~/.hermes/plugins/
 hermes plugins enable hermes-todo-goal
 ```
 
-Not run yet. Once loaded, the tool appears as `goal_control` in the `goals`
+Once loaded, the tool appears as `goal_control` in the `goals`
 toolset (plugin toolsets are enabled automatically; nothing to tick in
 `hermes tools`) and the skill as `goal-workflow`.
 
@@ -146,6 +158,8 @@ From the repository root:
 python3 -B -m unittest discover -s tests -p 'test_contract.py' -v
 python3 -B -m unittest discover -s tests -p 'test_service.py' -v
 python3 -B -m unittest discover -s tests -p 'test_plugin.py' -v
+python3 -B -m unittest discover -s tests -p 'test_todo_pairing.py' -v
+python3 -B -m unittest discover -s tests -p 'test_audit.py' -v
 
 # 2. Native integration: real GoalManager and SessionDB against a throwaway HERMES_HOME.
 #    HERMES_DISABLE_LAZY_INSTALLS=1 is required: without it a foreign HERMES_HOME

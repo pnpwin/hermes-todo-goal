@@ -130,10 +130,7 @@ class HermesGoalAdapter:
         self._transcript_id_getter = transcript_id_getter or (lambda: "")
         self._goals_module = goals_module
         self._max_turns_getter = max_turns_getter
-        self._data_dir_getter = data_dir_getter or (
-            lambda: __import__("plugins.plugin_storage", fromlist=["plugin_data_dir"])
-            .plugin_data_dir(PLUGIN_NAME)
-        )
+        self._data_dir_getter = data_dir_getter
 
     # ---- plumbing -----------------------------------------------------
     @property
@@ -246,30 +243,43 @@ class HermesGoalAdapter:
         return asdict(state)
 
     # ---- audit --------------------------------------------------------
-    def _audit_path(self) -> Path:
+    def _audit_path(self, *, create=False) -> Path:
         digest = hashlib.sha256(self.session_key().encode("utf-8")).hexdigest()[:32]
-        root = Path(self._data_dir_getter()) / "goals"
-        root.mkdir(parents=True, exist_ok=True)
+        if self._data_dir_getter is not None:
+            base = Path(self._data_dir_getter())
+        elif create:
+            from plugins.plugin_storage import plugin_data_dir
+            base = plugin_data_dir(PLUGIN_NAME)
+        else:
+            # Host plugin_data_dir() always mkdirs. Mirror its documented path
+            # only for reads; writes still resolve through the supported API.
+            from hermes_constants import get_hermes_home
+            base = get_hermes_home() / "plugin-data" / PLUGIN_NAME
+        root = base / "goals"
+        if create:
+            root.mkdir(parents=True, exist_ok=True)
         return root / f"{digest}.json"
 
+    def audit_binding(self, generation):
+        from .audit import AuditError, binding_for, read_payload
+        try:
+            data = read_payload(self._audit_path())
+            if data is None:
+                return None, "missing"
+            if data.get("generation") != generation:
+                return None, "generation_mismatch"
+            return binding_for(data, generation), "confirmed"
+        except (AuditError, OSError, ValueError, TypeError):
+            return None, "failed"
+
     def audit(self, event: dict[str, Any]) -> bool:
-        """Append to this session's audit log; never raises, never blocks a mutation."""
-        target = self._audit_path()
-        payload: dict[str, Any] = {"generation": None, "events": []}
+        """Confirm audit separately; native mutation is never rolled back here."""
+        from .audit import AuditError, append_event
         try:
-            if target.exists():
-                payload = json.loads(target.read_text(encoding="utf-8")) or payload
-        except (OSError, ValueError):
-            payload = {"generation": None, "events": []}
-        after = event.get("after") or {}
-        payload["generation"] = payload.get("generation") or after.get("created_at")
-        events = list(payload.get("events") or [])
-        events.append(event)
-        payload["events"] = events[-AUDIT_EVENTS_KEPT:]
-        try:
-            tmp = target.with_suffix(".tmp")
-            tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
-            os.replace(tmp, target)
-        except OSError:
+            state = self.load()
+            if state is None or state.get("created_at") != (event.get("after") or {}).get("created_at"):
+                return False
+            append_event(self._audit_path(create=True), event, keep=AUDIT_EVENTS_KEPT)
+        except (AuditError, OSError, ValueError, TypeError, GoalError):
             return False
         return True
