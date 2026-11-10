@@ -86,14 +86,16 @@ class NativeAdapterTest(unittest.TestCase):
         goals.save_goal(self.key, state)
 
         before = self.service.handle({"action": "status"})
-        updated = self.service.handle({
-            "action": "update",
-            "expected_revision": before["revision"],
-            "contract": {**CONTRACT, "verification": "Run artifact tests twice"},
-        })
-        self.assertTrue(updated["changed"])
+        with self.assertRaises(GoalError) as caught:
+            self.service.handle({
+                "action": "update",
+                "expected_revision": before["revision"],
+                "contract": {**CONTRACT, "verification": "Run artifact tests twice"},
+            })
+        self.assertEqual(caught.exception.code, "contract_change_requires_user")
         after = self.service.handle({"action": "status"})["state"]
-        self.assertEqual(after["contract"]["verification"], "Run artifact tests twice")
+        self.assertEqual(after, before["state"])
+        self.assertEqual(after["contract"]["verification"], CONTRACT["verification"])
         self.assertEqual(after["turns_used"], 5)
         self.assertEqual(after["subgoals"], ["keep the docs"])
         self.assertEqual(len(after["gates"]), 1)

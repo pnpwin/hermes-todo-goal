@@ -191,21 +191,34 @@ class ServiceTest(unittest.TestCase):
             })
         self.assertEqual(ctx.exception.code, "todo_unavailable")
 
+    def test_contract_change_requires_user_control(self):
+        state = new_state()
+        adapter = FakeAdapter(state=state)
+        with self.assertRaises(GoalError) as caught:
+            GoalService(adapter).handle({"action": "update",
+                "expected_revision": state_revision(state),
+                "contract": contract(verification="Explain why tests were skipped")})
+        self.assertEqual(caught.exception.code, "contract_change_requires_user")
+        self.assertEqual(adapter.state, state)
+        self.assertEqual(adapter.writes, 0)
+        self.assertEqual(adapter.audits, [])
+
     def test_update_preserves_budget_subgoals_gates_and_wait(self):
         state = new_state(waiting_on_pid=4242, waiting_reason="waiting")
         adapter = FakeAdapter(state=state)
-        result = GoalService(adapter).handle({
-            "action": "update", "expected_revision": state_revision(state),
-            "contract": contract(verification="New proof"),
-        })
-        self.assertTrue(result["changed"])
+        with self.assertRaises(GoalError) as caught:
+            GoalService(adapter).handle({
+                "action": "update", "expected_revision": state_revision(state),
+                "contract": contract(verification="New proof"),
+            })
+        self.assertEqual(caught.exception.code, "contract_change_requires_user")
+        self.assertEqual(adapter.writes, 0)
         new = adapter.state
         for key in ("turns_used", "max_turns", "created_at", "subgoals", "gates",
                     "waiting_on_pid", "waiting_reason", "status"):
             self.assertEqual(new[key], state[key], key)
-        self.assertEqual(new["contract"]["verification"], "New proof")
-        self.assertIsNone(new["last_verdict"])
-        self.assertEqual(adapter.audits[0]["event"], "update")
+        self.assertEqual(new, state)
+        self.assertEqual(adapter.audits, [])
 
     def test_update_requires_matching_revision(self):
         adapter = FakeAdapter(state=new_state())
@@ -232,13 +245,13 @@ class ServiceTest(unittest.TestCase):
         self.assertFalse(result["changed"])
         self.assertEqual(adapter.writes, 0)
 
-    def test_update_detects_lost_native_fields(self):
+    def test_pause_detects_lost_native_fields(self):
         state = new_state()
         adapter = FakeAdapter(state=state, drop_on_write={"gates"})
         with self.assertRaises(GoalError) as ctx:
             GoalService(adapter).handle({
-                "action": "update", "expected_revision": state_revision(state),
-                "contract": contract(outcome="Changed"),
+                "action": "pause", "expected_revision": state_revision(state),
+                "reason": "waiting",
             })
         self.assertEqual(ctx.exception.code, "persistence_unverified")
 

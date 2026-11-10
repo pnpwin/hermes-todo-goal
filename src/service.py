@@ -282,19 +282,11 @@ class GoalService:
             return self._result("update", state, changed=False,
                                 notice="the goal already carries this exact outcome and contract")
 
-        self._adapter.replace_contract(state, outcome, prepared["contract"])
-        confirmed = self._readback(
-            {**{key: state.get(key) for key in PRESERVED_ON_UPDATE},
-             "goal": outcome, "contract": prepared["contract"]},
-            PRESERVED_ON_UPDATE + ("goal", "contract"),
-        )
-        self._audit("update", before=state, after=confirmed,
-                    reason=_text_arg(args, "reason", MAX_REASON_CHARS)
-                    if args.get("reason") else "")
-        return self._result(
-            "update", confirmed, changed=True,
-            notice="goal contract updated in place; budget, gates and subgoals were preserved "
-                   "and the next turn-boundary check judges the new contract",
+        raise GoalError(
+            "contract_change_requires_user",
+            "This host has no trusted in-tool contract approval channel. "
+            "Ask the user to change the contract through native goal control; "
+            "do not replace or clear the goal as a workaround.",
         )
 
     def _action_pause(self, args: dict[str, Any]) -> dict[str, Any]:
