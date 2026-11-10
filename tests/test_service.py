@@ -475,6 +475,20 @@ class ServiceTest(unittest.TestCase):
         self.assertEqual(adapter.state, state)
         self.assertEqual(adapter.writes, 0)
 
+    def test_complete_failed_audit_does_not_claim_unknown_native_write(self):
+        state = new_state()
+        adapter = FakeAdapter(state=state)
+        def fail_audit(event):
+            adapter.load = lambda: None
+            return False
+        adapter.audit = fail_audit
+        result = GoalService(adapter).handle({"action": "complete",
+            "expected_revision": state_revision(state), "evidence": "verified"})
+        self.assertFalse(result["ok"])
+        self.assertIs(result["changed"], False)
+        self.assertEqual(adapter.writes, 0)
+        self.assertEqual(result["outcome"], "unknown")
+
     def test_complete_requires_evidence(self):
         state = new_state()
         with self.assertRaises(GoalError) as ctx:

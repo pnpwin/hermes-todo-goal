@@ -20,9 +20,17 @@ CONTRACT = {
 
 
 class RecordingContext:
-    def __init__(self):
+    def __init__(self, settings=None):
         self.tools = {}
         self.skills = {}
+        self.settings = settings or {}
+        self.sections = []
+
+    def get_config(self, key, default=None):
+        return self.settings.get(key, default)
+
+    def register_system_prompt_section(self, *args, **kwargs):
+        self.sections.append((args, kwargs))
 
     def register_tool(self, name, toolset, schema, handler, **kwargs):
         self.tools[name] = {"toolset": toolset, "schema": schema, "handler": handler, **kwargs}
@@ -67,6 +75,12 @@ class SchemaTest(unittest.TestCase):
         self.assertEqual(params["required"], ["action"])
         for forbidden in ("session_id", "profile", "approved", "reset_budget", "home", "db_path"):
             self.assertNotIn(forbidden, params["properties"])
+
+    def test_description_matches_long_running_skill_policy(self):
+        phrase = "likely to need continuation across turns"
+        self.assertIn(phrase, GOAL_SCHEMA["description"])
+        self.assertIn(phrase, plugin.SKILL_PATH.read_text())
+        self.assertIn("short tasks", GOAL_SCHEMA["description"])
 
     def test_contract_requires_all_five_fields(self):
         contract = GOAL_SCHEMA["parameters"]["properties"]["contract"]
@@ -169,6 +183,68 @@ class HandlerTest(unittest.TestCase):
 
 
 class RegistrationTest(unittest.TestCase):
+    def test_routing_section_is_off_by_default(self):
+        ctx = RecordingContext()
+        with mock.patch("src.desktop.missing_symbols", return_value=[]):
+            plugin.register(ctx)
+        self.assertEqual(ctx.sections, [])
+        self.assertIn("goal_control", ctx.tools)
+
+    def test_routing_policy_requires_cross_turn_work(self):
+        self.assertIn("Multiple tool calls alone do not justify a goal.", plugin.SECTION_TEXT)
+        self.assertIn("Do not replace, rewrite or resume an existing", plugin.SECTION_TEXT)
+        self.assertNotIn("status` first, then `update", plugin.SECTION_TEXT)
+        self.assertLessEqual(len(plugin.SECTION_TEXT), 2000)
+
+    def test_routing_requires_literal_opt_in_and_qualified_host(self):
+        for setting, capability, expected in ((True, True, 1), (True, False, 0),
+                                             ("true", True, 0), (1, True, 0), (False, True, 0)):
+            with self.subTest(setting=setting, capability=capability):
+                ctx = RecordingContext({"auto_create": setting})
+                with mock.patch("src.desktop.missing_symbols", return_value=[]), mock.patch(
+                    "src.plugin._atomicity_available", return_value=capability):
+                    plugin.register(ctx)
+                self.assertEqual(len(ctx.sections), expected)
+                self.assertIn("goal_control", ctx.tools)
+                if expected:
+                    self.assertEqual(ctx.sections[0], ((plugin.SECTION_ID, plugin.SECTION_TEXT),
+                                     {"position": "after_memory", "max_chars": 2000}))
+
+    def test_production_atomicity_probe_is_not_a_config_override(self):
+        self.assertFalse(plugin._atomicity_available())
+        ctx = RecordingContext({"auto_create": True, "atomicity_available": True})
+        with mock.patch("src.desktop.missing_symbols", return_value=[]):
+            plugin.register(ctx)
+        self.assertEqual(ctx.sections, [])
+
+    def test_older_context_keeps_tool_and_skill(self):
+        ctx = RecordingContext({"auto_create": True})
+        ctx.register_system_prompt_section = None
+        with mock.patch("src.desktop.missing_symbols", return_value=[]):
+            plugin.register(ctx)
+        self.assertIn("goal_control", ctx.tools)
+        self.assertIn("goal-workflow", ctx.skills)
+
+    def test_incompatible_host_never_registers_guidance(self):
+        ctx = RecordingContext({"auto_create": True})
+        with mock.patch("src.desktop.missing_symbols", return_value=["missing"]), mock.patch(
+            "src.plugin._atomicity_available", return_value=True):
+            plugin.register(ctx)
+        self.assertEqual(ctx.sections, [])
+
+    def test_section_failure_is_nonfatal_and_does_not_log_details(self):
+        for failure in (ValueError, TypeError):
+            with self.subTest(failure=failure):
+                ctx = RecordingContext({"auto_create": True})
+                ctx.register_system_prompt_section = mock.Mock(side_effect=failure("private-canary"))
+                with mock.patch("src.desktop.missing_symbols", return_value=[]), mock.patch(
+                    "src.plugin._atomicity_available", return_value=True), self.assertLogs(
+                    "src.plugin", level="WARNING") as captured:
+                    plugin.register(ctx)
+                self.assertIn("goal_control", ctx.tools)
+                self.assertIn("goal-workflow", ctx.skills)
+                self.assertNotIn("private-canary", str(captured.output))
+
     def test_registers_one_tool_and_one_bundled_skill(self):
         ctx = RecordingContext()
         with mock.patch("src.desktop.missing_symbols", return_value=[]):

@@ -238,7 +238,8 @@ class GoalService:
         except Exception:
             actual = None
         if actual is None:
-            result.update(state=None, revision=None, changed=None,
+            result.update(state=None, revision=None,
+                          changed=False if action == "complete" else None,
                           native_status="unknown", outcome="unknown")
         else:
             result.update(state=_project(actual), revision=state_revision(actual),

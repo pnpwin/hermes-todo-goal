@@ -70,6 +70,14 @@ Native success + audit failure → ok:false, partial, фактический sta
 невозможно. Никакого rollback или auto-retry. Status может вернуть ok:true для
 native state и audit_status:failed/warning/null binding. Аудит не GoalStore.
 
+## Offline routing policy
+
+`settings.auto_create` — bool, default false; секция требует true и квалифицированный
+host CAS. Текущий production probe всегда False до companion implementation и
+all-writer acceptance. Ни config, ни test stub не включают native capability.
+Policy согласована с tool description и skill: direct verifiable long-running
+work, не вопросы/планы/короткие задачи. Native request delivery ещё не проверена.
+
 ## Граница полной приёмки
 
 Общий native CAS, включая UI/judge/clear/migration/continuation и ABA, не реализован

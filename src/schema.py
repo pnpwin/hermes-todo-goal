@@ -14,8 +14,11 @@ from .service import ACTIONS
 _TOOL_DESCRIPTION = (
     "Manage the Goal of the CURRENT chat session: status, create, update, pause, resume, "
     "complete. A Goal is the completion contract Hermes itself keeps judging after each "
-    "turn; it is independent of any todo list. Use 'create' when the user asks for work to "
-    "be carried through (not for 'just make a plan'). 'update' only accepts an identical "
+    "turn; it is independent of any todo list. Use 'create' for directly requested, "
+    "verifiable work likely to need continuation across turns. Multiple tool calls "
+    "alone do not justify it: exclude short tasks, questions, exploration and plan-only "
+    "requests. Read status first; do not replace an existing goal for a new request. "
+    "'update' only accepts an identical "
     "contract as a no-op; changes require native user control. 'pause'/'resume' manage "
     "continuation, and 'complete' to submit evidence for verification. 'complete' does not "
     "mark the goal done - Hermes' own judge and quality gates decide that at the turn "
@@ -60,7 +63,8 @@ GOAL_SCHEMA: dict = {
                 "type": "string",
                 "description": (
                     "Opaque revision returned by action=status. Required for update, pause, "
-                    "resume and complete so a change made elsewhere is not overwritten."
+                    "resume and complete for stale-snapshot preflight rejection. This is not "
+                    "an atomic compare-and-set or an ABA-safe version."
                 ),
             },
             "expected_todo_revision": {

@@ -104,6 +104,16 @@ Full semantics and error codes:
 - Revision hashes/readback do **not** prevent concurrent UI/judge writes or ABA.
   Full automatic activation remains blocked on a shared native CAS implementation.
 
+### Automatic routing remains off
+
+`plugins.entries.hermes-todo-goal.settings.auto_create` defaults to false and
+requires a literal boolean true plus a qualified shared native CAS capability.
+This candidate intentionally reports that capability unavailable, so even an opt-in
+cannot inject the section on the current host. Positive registration tests stub the
+capability; they do not qualify prompt delivery or model behaviour.
+Routing means directly requested, verifiable work likely to need multiple turns,
+not merely multiple tool calls. Existing goals are not automatically rewritten.
+
 ## Installation (published release, not approval to deploy this candidate)
 
 Published releases: https://github.com/pnpwin/hermes-todo-goal (MIT).

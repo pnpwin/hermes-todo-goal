@@ -10,6 +10,8 @@
   read without mutation, serialize audit writers and retain corrupt journals.
 - Shared native CAS remains a release/automatic-activation blocker. Historical
   verification below does not qualify the current candidate; no version bump.
+- Add default-off long-running routing policy. Production capability stays false
+  until shared native CAS is qualified; opt-in alone cannot activate it.
 - Correct the old blanket CLI/`-z` claim: continuation depends on the actual
   execution owner; direct judge invocation is not live next-turn acceptance.
 

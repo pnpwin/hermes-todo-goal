@@ -24,7 +24,10 @@ reply — slash commands are user actions, not tool calls.
 
 ## When to Use
 
-- The user asks for work to be carried through to a verified result → `create`.
+- Directly requested, verifiable work likely to need continuation across turns →
+  read `status`, then `create` only if no live Goal would be replaced. Multiple
+  tool calls alone do not justify a Goal. Automatic activation is not qualified
+  until the host CAS gate is closed; this guidance is not a capability grant.
 - The user says "just make a plan", "discuss", "explain", or asks a single question
   → do **not** create a goal; answer or use `todo_list` only.
 - A short task you can finish in this turn with evidence → do **not** create a goal;
