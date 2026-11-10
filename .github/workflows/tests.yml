@@ -24,5 +24,7 @@ jobs:
         run: python -m unittest discover -s tests -p 'test_contract.py' -v
       - name: Service policy
         run: python -m unittest discover -s tests -p 'test_service.py' -v
+      - name: Todo result provenance
+        run: python -m unittest discover -s tests -p 'test_todo_pairing.py' -v
       - name: Schema and registration
         run: python -m unittest discover -s tests -p 'test_plugin.py' -v

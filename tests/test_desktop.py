@@ -48,7 +48,9 @@ def _key() -> str:
 class NativeAdapterTest(unittest.TestCase):
     def setUp(self):
         self.key = _key()
-        self.adapter = HermesGoalAdapter(session_key_getter=lambda: self.key)
+        self.transcript = self.key + "-transcript"
+        self.adapter = HermesGoalAdapter(session_key_getter=lambda: self.key,
+                                        transcript_id_getter=lambda: self.transcript)
         self.service = GoalService(self.adapter)
 
     def tearDown(self):
@@ -148,9 +150,9 @@ class NativeAdapterTest(unittest.TestCase):
         payload = json.dumps({"todos": [{"id": "a", "content": "x", "status": "pending"}],
                               "revision": 9})
         db = self.adapter._store()
-        db.ensure_session(self.key, source="test")
-        db.append_message(self.key, "user", "hello")
-        db.append_message(self.key, "tool", payload, tool_name="todo_list")
+        db.ensure_session(self.transcript, source="test")
+        db.append_message(self.transcript, "user", "hello")
+        db.append_message(self.transcript, "tool", payload, tool_name="todo_list")
         self.assertIsNone(self.adapter.todo_snapshot())
 
     def test_create_with_todo_binding_uses_live_transcript(self):
@@ -203,17 +205,112 @@ class NativeAdapterTest(unittest.TestCase):
         self.assertEqual(data["events"][-1]["event"], "create")
         self.assertNotIn(self.key, path.read_text(encoding="utf-8"))
 
+    def test_dispatch_uses_distinct_transcript_identity(self):
+        from gateway.session_context import scoped_session_key
+        from tools.registry import registry
+        from model_tools import handle_function_call
+        from hermes_cli import goals
+        transcript = self.key + "-transcript"
+        self._append_todo_turn(json.dumps({"revision": 4, "todos": [
+            {"id": "a", "content": "task", "status": "pending"}]}), session_id=transcript)
+
+        class Context:
+            def register_tool(self, **kwargs):
+                registry.register(**kwargs)
+            def register_skill(self, *args, **kwargs):
+                pass
+
+        plugin.register(Context())
+        with scoped_session_key(self.key):
+            raw = handle_function_call("goal_control", {
+                "action": "create", "contract": dict(CONTRACT), "expected_todo_revision": 4,
+            }, session_id=transcript, conversation_id="untrusted-parent",
+                enabled_tools=["goal_control"])
+        result = json.loads(raw)
+        self.assertTrue(result.get("ok"), result)
+        self.assertEqual(result["todo_binding"], {"revision": 4, "ids": ["a"]})
+        self.assertIsNotNone(goals.load_goal(self.key))
+        self.assertIsNone(goals.load_goal(transcript))
+
+    def test_delegated_child_cannot_use_parent_goal(self):
+        from gateway.session_context import scoped_session_key
+        from agent.delegation_context import delegated_child_context
+        handler = plugin.build_handler(HermesGoalAdapter)
+        with scoped_session_key(self.key), delegated_child_context("child"):
+            result = json.loads(handler({"action": "create", "contract": dict(CONTRACT)}))
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["error"]["code"], "no_session")
+        self.assertIsNone(self.adapter.load())
+
+    def test_missing_transcript_refuses_binding_but_allows_standalone(self):
+        from gateway.session_context import scoped_session_key
+        from test_plugin import RecordingContext
+        ctx = RecordingContext()
+        plugin.register(ctx)
+        handler = ctx.tools["goal_control"]["handler"]
+        with scoped_session_key(self.key):
+            bound = json.loads(handler({"action": "create", "contract": dict(CONTRACT),
+                "expected_todo_revision": 4}, conversation_id=self.transcript))
+            self.assertFalse(bound["ok"])
+            self.assertEqual(bound["error"]["code"], "todo_unavailable")
+            self.assertIsNone(self.adapter.load())
+            standalone = json.loads(handler({"action": "create", "contract": dict(CONTRACT)}))
+            self.assertTrue(standalone["ok"], standalone)
+
+    def test_todo_pairing_rejects_wrong_call_or_boundary(self):
+        from src.desktop import _paired_with_todo_call
+        assistant = {"role": "assistant", "tool_calls": [
+            {"id": "c1", "function": {"name": "todo_list", "arguments": "{}"}}]}
+        for between, ident in (([], "wrong"), ([{"role": "user"}], "c1"),
+                                ([{"role": "assistant", "content": "new"}], "c1")):
+            with self.subTest(between=between, ident=ident):
+                rows = [assistant, *between, {"role": "tool", "tool_call_id": ident}]
+                self.assertFalse(_paired_with_todo_call(rows, len(rows)-1))
+
+    def test_latest_invalid_paired_todo_does_not_revive_old_plan(self):
+        self._append_todo_turn(json.dumps({"revision": 1, "todos": []}))
+        self._append_todo_turn(json.dumps({"revision": True, "todos": []}))
+        self.assertIsNone(self.adapter.todo_snapshot())
+
+    def test_latest_paired_clear_is_authoritative(self):
+        self._append_todo_turn(json.dumps({"revision": 1, "todos": [
+            {"id": "a", "content": "task", "status": "pending"}]}))
+        self._append_todo_turn(json.dumps({"revision": 2, "todos": []}))
+        self.assertEqual(self.adapter.todo_snapshot(), {"revision": 2, "todos": []})
+
+    def test_unpaired_new_result_does_not_hide_paired_snapshot(self):
+        self._append_todo_turn(json.dumps({"revision": 1, "todos": []}))
+        self.adapter._store().append_message(self.transcript, "tool",
+            json.dumps({"revision": 99, "todos": []}), tool_call_id="wrong")
+        self.assertEqual(self.adapter.todo_snapshot(), {"revision": 1, "todos": []})
+
+    def test_todo_native_alias_and_bridge_predicate(self):
+        from src.desktop import _paired_with_todo_call
+        from tools.tool_search_catalog import TOOL_CALL_NAME
+        entry = {"name": "todo_list", "arguments": {}}
+        for name, args, expected in (
+            ("todo", {}, True),
+            (TOOL_CALL_NAME, {"calls": [entry]}, True),
+            (TOOL_CALL_NAME, {"calls": [entry, entry]}, False),
+        ):
+            with self.subTest(name=name, args=args):
+                rows = [{"role": "assistant", "tool_calls": [{"id": "x", "function":
+                    {"name": name, "arguments": json.dumps(args)}}]},
+                    {"role": "tool", "tool_call_id": "x"}]
+                self.assertEqual(_paired_with_todo_call(rows, 1), expected)
+
     # ---- helpers ------------------------------------------------------
-    def _append_todo_turn(self, payload_json: str) -> None:
+    def _append_todo_turn(self, payload_json: str, session_id=None) -> None:
         db = self.adapter._store()
-        db.ensure_session(self.key, source="test")
-        db.append_message(self.key, "user", "plan this")
+        sid = session_id or self.transcript
+        db.ensure_session(sid, source="test")
+        db.append_message(sid, "user", "plan this")
         db.append_message(
-            self.key, "assistant", "",
+            sid, "assistant", "",
             tool_calls=[{"id": "call-1", "type": "function",
                          "function": {"name": "todo_list", "arguments": "{}"}}],
         )
-        db.append_message(self.key, "tool", payload_json, tool_name="todo_list",
+        db.append_message(sid, "tool", payload_json, tool_name="todo_list",
                           tool_call_id="call-1")
 
 

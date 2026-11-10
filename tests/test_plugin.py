@@ -103,6 +103,17 @@ class HandlerTest(unittest.TestCase):
         self.assertEqual(result["error"]["code"], "internal_error")
         self.assertNotIn("Traceback", result["error"]["message"])
 
+    def test_non_object_arguments_return_json(self):
+        handler = plugin.build_handler(lambda: StubAdapter())
+        result = json.loads(handler("status"))
+        self.assertEqual(result["error"]["code"], "args_invalid")
+
+    def test_internal_error_does_not_disclose_exception_text(self):
+        handler = plugin.build_handler(lambda: StubAdapter(raises=RuntimeError("private-canary")))
+        raw = handler({"action": "status"})
+        self.assertNotIn("private-canary", raw)
+        self.assertEqual(json.loads(raw)["error"]["code"], "internal_error")
+
     def test_status_result_is_json_serialisable(self):
         handler = plugin.build_handler(lambda: StubAdapter(state=None))
         result = json.loads(handler({"action": "status"}))

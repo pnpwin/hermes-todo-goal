@@ -36,6 +36,7 @@ REQUIRED_SYMBOLS = (
     ("hermes_cli.goals", "GoalManager"),
     ("hermes_cli.goals", "GoalContract"),
     ("gateway.session_context", "bound_session_key"),
+    ("agent.delegation_context", "is_delegated_child_context"),
     ("tools.todo_tool", "is_todo_tool_call"),
     ("plugins.plugin_storage", "plugin_data_dir"),
 )
@@ -65,7 +66,10 @@ def _goals():
 
 def _session_key() -> str:
     from gateway.session_context import bound_session_key
+    from agent.delegation_context import is_delegated_child_context
 
+    if is_delegated_child_context():
+        return ""
     return bound_session_key() or ""
 
 
@@ -105,13 +109,9 @@ def _paired_with_todo_call(rows: list[dict[str, Any]], index: int) -> bool:
     """
     from tools.todo_tool import is_todo_tool_call
 
-    for row in reversed(rows[:index]):
-        if row.get("role") != "assistant":
-            continue
-        for call in row.get("tool_calls") or []:
-            if is_todo_tool_call(call):
-                return True
-    return False
+    from .todo_pairing import paired_with_todo_call
+
+    return paired_with_todo_call(rows, index, is_todo_tool_call)
 
 
 class HermesGoalAdapter:
@@ -124,8 +124,10 @@ class HermesGoalAdapter:
         goals_module=None,
         max_turns_getter: Callable[[], int] = _max_turns,
         data_dir_getter: Callable[[], Path] | None = None,
+        transcript_id_getter: Callable[[], str] | None = None,
     ):
         self._session_key_getter = session_key_getter
+        self._transcript_id_getter = transcript_id_getter or (lambda: "")
         self._goals_module = goals_module
         self._max_turns_getter = max_turns_getter
         self._data_dir_getter = data_dir_getter or (
@@ -149,6 +151,12 @@ class HermesGoalAdapter:
                 "Goals are per-session; run this from a live chat turn.",
             )
         return key
+
+    def transcript_id(self) -> str:
+        value = self._transcript_id_getter()
+        if not isinstance(value, str) or not value or value != value.strip():
+            raise GoalError("todo_unavailable", "No trusted transcript session ID was supplied.")
+        return value
 
     def _store(self):
         db = self.goals._get_session_db()
@@ -178,7 +186,7 @@ class HermesGoalAdapter:
         db = self._store()
         try:
             rows = db.get_messages(
-                self.session_key(), limit=TODO_TRANSCRIPT_LIMIT, latest=True,
+                self.transcript_id(), limit=TODO_TRANSCRIPT_LIMIT, latest=True,
                 include_ancestors=True,
             )
         except Exception as exc:  # pragma: no cover - store-specific failures
@@ -187,10 +195,10 @@ class HermesGoalAdapter:
             row = rows[index]
             if row.get("role") != "tool":
                 continue
-            payload = _parse_todo_payload(row.get("content"))
-            if payload is None:
+            if not _paired_with_todo_call(rows, index):
                 continue
-            return payload if _paired_with_todo_call(rows, index) else None
+            # A paired clear or invalid latest snapshot supersedes older plans.
+            return _parse_todo_payload(row.get("content"))
         return None
 
     # ---- writes -------------------------------------------------------
